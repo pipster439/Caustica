@@ -294,39 +294,20 @@ public float cloudSegmentTransmittance(float3 origin, float3 dir, float maxT, fl
 }
 
 /**
- * Continuous Orthographic Hemispherical Projection:
- * Left square (uv.x in [0, 0.5]): Upper sky dome (dy >= 0).
- * Right square (uv.x in [0.5, 1.0]): Lower ground hemisphere (dy < 0).
- * Zenith (0, 1, 0) maps to the exact continuous center (0.25, 0.50).
- * The mapping uv = dir.xz * 0.49 + 0.5 is strictly linear and isotropic everywhere around zenith.
- * Completely eliminates all pyramid creases, polar vortices, and seam lines.
+ * Equirectangular dome coordinates shared by the bake (which writes texel centres) and every sampler of
+ * the dome (world.rmiss, primary). U wraps around the horizon; V runs from zenith to nadir.
  */
 public float2 cloudDomeUv(float3 dir) {
-    if (dir.y >= 0.0) {
-        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
-        return float2(local.x * 0.5, local.y);
-    } else {
-        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
-        return float2(0.5 + local.x * 0.5, local.y);
-    }
+    float u = atan2(dir.z, dir.x) * (0.5 / SKY_PI) + 0.5;
+    float v = acos(clamp(dir.y, -1.0, 1.0)) / SKY_PI;
+    return float2(u, v);
 }
 
 public float3 cloudDomeDir(float2 uv) {
-    if (uv.x < 0.5) {
-        float2 local = float2(uv.x * 2.0, uv.y);
-        float2 p = (local - 0.5) / 0.49;
-        float r2 = dot(p, p);
-        float dy = sqrt(max(0.0, 1.0 - min(r2, 1.0)));
-        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
-        return float3(p.x * s, dy, p.y * s);
-    } else {
-        float2 local = float2((uv.x - 0.5) * 2.0, uv.y);
-        float2 p = (local - 0.5) / 0.49;
-        float r2 = dot(p, p);
-        float dy = -sqrt(max(0.0, 1.0 - min(r2, 1.0)));
-        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
-        return float3(p.x * s, dy, p.y * s);
-    }
+    float azimuth = (uv.x - 0.5) * 2.0 * SKY_PI;
+    float zenith = uv.y * SKY_PI;
+    float sinZenith = sin(zenith);
+    return float3(cos(azimuth) * sinZenith, cos(zenith), sin(azimuth) * sinZenith);
 }
 
 // Production dual-lobe cloud phase: forward HG lobe, backscatter lobe, and anti-solar silver lining boost.
