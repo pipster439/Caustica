@@ -33,8 +33,9 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.*;
 
 /**
- * The sky's three LUTs (Hillaire 2020) and the compute passes that bake them. See
- * {@code shaders/pipelines/world/sky.slang} for the physics.
+ * The sky's three LUTs (Hillaire 2020) plus the volumetric cloud dome, and the compute passes that bake
+ * them. See {@code shaders/pipelines/world/sky.slang} for the atmosphere physics and
+ * {@code shaders/pipelines/world/clouds.slang} for the cloud field.
  *
  * <ul>
  *   <li><b>Transmittance</b> 256x64 — point-to-space extinction by (altitude, cos zenith). Static.</li>
@@ -42,12 +43,14 @@ import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.*;
  *       orders that lights twilight and the night sky.</li>
  *   <li><b>Sky view</b> 192x216 — the dome itself, one 192x108 slice per celestial body, rebuilt every
  *       frame from the sun/moon angles in {@code WorldPush}.</li>
+ *   <li><b>Cloud dome</b> 384x216 — volumetric cloud in-scatter (RGB) and transmittance (A) along every
+ *       sky direction, rebuilt every frame in the overworld so no radiance ray ever marches clouds.</li>
  * </ul>
  *
  * <p>The two static LUTs are baked on the first frame rather than at construction: they read the ground
  * albedo from the look package through the frame's {@code WorldPush} slot, so they need a frame's push
- * buffer to exist. All three passes share one descriptor set and one pipeline layout — every pass
- * declares all five bindings, and each uses the subset it needs.
+ * buffer to exist. All passes share one descriptor set and one pipeline layout — every pass
+ * declares all six bindings, and each uses the subset it needs.
  *
  * <p>The images are single-buffered. The bake and the trace that reads it run in the same submission with
  * a barrier between, and the composite's end-of-frame barrier orders the next frame's overwrite against
@@ -65,13 +68,25 @@ public final class RtSkyLut {
     public static final int SKY_VIEW_SLICE_HEIGHT = 108;
     public static final int SKY_VIEW_BODY_COUNT = 2;
     public static final int SKY_VIEW_HEIGHT = SKY_VIEW_SLICE_HEIGHT * SKY_VIEW_BODY_COUNT;
+    // Keep in lock-step with shaders/pipelines/sky_lut/clouds.comp.slang.
+    public static final int CLOUD_DOME_WIDTH = 1024;
+    public static final int CLOUD_DOME_HEIGHT = 512;
+    // Keep in lock-step with shaders/pipelines/sky_lut/noise3d.comp.slang.
+    public static final int SHAPE_NOISE_SIZE = 128;
+    public static final int CURL_NOISE_SIZE = 64;
     private static final int GROUP_SIZE = 8;
+    private static final int NOISE_GROUP_SIZE = 4;
 
     private final RtContext ctx;
     private final RtImage transmittance;
     private final RtImage multiScatter;
     private final RtImage skyView;
+    private final RtImage cloudDome;
+    private final RtImage cloudShapeNoise;
+    private final RtImage cloudCurlNoise;
     private final long sampler;
+    private final long cloudDomeSampler;
+    private final long noiseSampler;
     private final long descriptorSetLayout;
     private final long descriptorPool;
     private final long descriptorSet;
@@ -79,18 +94,27 @@ public final class RtSkyLut {
     private final long transmittancePipeline;
     private final long multiScatterPipeline;
     private final long skyViewPipeline;
+    private final long cloudsPipeline;
+    private final long noise3dPipeline;
     private boolean staticLutsBaked;
     private boolean destroyed;
 
     private RtSkyLut(RtContext ctx, RtImage transmittance, RtImage multiScatter, RtImage skyView,
-                     long sampler, long descriptorSetLayout, long descriptorPool, long descriptorSet,
-                     long pipelineLayout, long transmittancePipeline, long multiScatterPipeline,
-                     long skyViewPipeline) {
+                     RtImage cloudDome, RtImage cloudShapeNoise, RtImage cloudCurlNoise, long sampler,
+                     long cloudDomeSampler, long noiseSampler, long descriptorSetLayout,
+                     long descriptorPool, long descriptorSet, long pipelineLayout,
+                     long transmittancePipeline, long multiScatterPipeline, long skyViewPipeline,
+                     long cloudsPipeline, long noise3dPipeline) {
         this.ctx = ctx;
         this.transmittance = transmittance;
         this.multiScatter = multiScatter;
         this.skyView = skyView;
+        this.cloudDome = cloudDome;
+        this.cloudShapeNoise = cloudShapeNoise;
+        this.cloudCurlNoise = cloudCurlNoise;
         this.sampler = sampler;
+        this.cloudDomeSampler = cloudDomeSampler;
+        this.noiseSampler = noiseSampler;
         this.descriptorSetLayout = descriptorSetLayout;
         this.descriptorPool = descriptorPool;
         this.descriptorSet = descriptorSet;
@@ -98,6 +122,8 @@ public final class RtSkyLut {
         this.transmittancePipeline = transmittancePipeline;
         this.multiScatterPipeline = multiScatterPipeline;
         this.skyViewPipeline = skyViewPipeline;
+        this.cloudsPipeline = cloudsPipeline;
+        this.noise3dPipeline = noise3dPipeline;
     }
 
     public static RtSkyLut create(RtContext ctx) {
@@ -108,6 +134,12 @@ public final class RtSkyLut {
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky multiple-scattering LUT");
         RtImage skyView = ctx.createStorageImage(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT,
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky view LUT");
+        RtImage cloudDome = ctx.createStorageImage(CLOUD_DOME_WIDTH, CLOUD_DOME_HEIGHT,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "volumetric cloud dome");
+        RtImage cloudShapeNoise = ctx.createStorageImage3D(SHAPE_NOISE_SIZE, SHAPE_NOISE_SIZE,
+                SHAPE_NOISE_SIZE, VK10.VK_FORMAT_R8G8_UNORM, "cloud shape/erosion noise");
+        RtImage cloudCurlNoise = ctx.createStorageImage3D(CURL_NOISE_SIZE, CURL_NOISE_SIZE,
+                CURL_NOISE_SIZE, VK10.VK_FORMAT_R8G8B8A8_UNORM, "cloud curl noise");
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // CLAMP on both axes. The sky-view LUT's U axis is angle-from-the-light, which is folded on
             // itself rather than wrapped, and its V axis stacks the two body slices — a REPEAT here would
@@ -124,13 +156,42 @@ public final class RtSkyLut {
             long sampler = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, "sky LUT sampler");
 
+            // The cloud dome is equirectangular: U wraps around the horizon, V clamps at the poles.
+            VkSamplerCreateInfo domeSamplerInfo = VkSamplerCreateInfo.calloc(stack).sType$Default()
+                    .magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR)
+                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .minLod(0.0f).maxLod(0.0f);
+            check(VK10.vkCreateSampler(vk, domeSamplerInfo, null, handle), "vkCreateSampler(cloud dome)");
+            long cloudDomeSampler = handle.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, cloudDomeSampler, "cloud dome sampler");
+
+            // The 3D noise volumes tile on every axis, so the sampler REPEATs all three.
+            VkSamplerCreateInfo noiseSamplerInfo = VkSamplerCreateInfo.calloc(stack).sType$Default()
+                    .magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR)
+                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+                    .minLod(0.0f).maxLod(0.0f);
+            check(VK10.vkCreateSampler(vk, noiseSamplerInfo, null, handle), "vkCreateSampler(cloud noise)");
+            long noiseSampler = handle.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, noiseSampler, "cloud noise sampler");
+
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(SKY_LUT_BINDING_COUNT, stack);
-            for (int i = SKY_LUT_TRANSMITTANCE_IMAGE; i <= SKY_LUT_SKY_VIEW_IMAGE; i++) {
-                bindings.get(i).binding(i).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+            int[] storageBindings = {SKY_LUT_TRANSMITTANCE_IMAGE, SKY_LUT_MULTISCATTER_IMAGE,
+                    SKY_LUT_SKY_VIEW_IMAGE, SKY_LUT_CLOUD_DOME_IMAGE,
+                    SKY_LUT_CLOUD_SHAPE_IMAGE, SKY_LUT_CLOUD_CURL_IMAGE};
+            for (int binding : storageBindings) {
+                bindings.get(binding).binding(binding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             }
-            for (int i = SKY_LUT_TRANSMITTANCE_SAMPLER; i < SKY_LUT_BINDING_COUNT; i++) {
-                bindings.get(i).binding(i).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+            int[] sampledBindings = {SKY_LUT_TRANSMITTANCE_SAMPLER, SKY_LUT_MULTISCATTER_SAMPLER,
+                    SKY_LUT_CLOUD_SHAPE_SAMPLER, SKY_LUT_CLOUD_CURL_SAMPLER};
+            for (int binding : sampledBindings) {
+                bindings.get(binding).binding(binding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             }
             VkDescriptorSetLayoutCreateInfo layoutInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
@@ -142,8 +203,8 @@ public final class RtSkyLut {
                     descriptorSetLayout, "sky LUT descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(3);
-            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(2);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(6);
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(4);
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
                     .sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, poolInfo, null, handle),
@@ -182,12 +243,15 @@ public final class RtSkyLut {
                     "multiscatter.comp.spv", "sky multiple-scattering pipeline");
             long skyViewPipeline = createComputePipeline(ctx, stack, pipelineLayout,
                     "view.comp.spv", "sky view pipeline");
+            long cloudsPipeline = createComputePipeline(ctx, stack, pipelineLayout,
+                    "clouds.comp.spv", "volumetric clouds pipeline");
+            long noise3dPipeline = createComputePipeline(ctx, stack, pipelineLayout,
+                    "noise3d.comp.spv", "cloud noise bake pipeline");
 
             VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(SKY_LUT_BINDING_COUNT, stack);
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(SKY_LUT_BINDING_COUNT, stack);
-            long[] storageViews = {transmittance.view, multiScatter.view, skyView.view};
-            int[] storageBindings = {SKY_LUT_TRANSMITTANCE_IMAGE, SKY_LUT_MULTISCATTER_IMAGE,
-                    SKY_LUT_SKY_VIEW_IMAGE};
+            long[] storageViews = {transmittance.view, multiScatter.view, skyView.view, cloudDome.view,
+                    cloudShapeNoise.view, cloudCurlNoise.view};
             for (int i = 0; i < storageViews.length; i++) {
                 int binding = storageBindings[i];
                 images.get(binding).imageView(storageViews[i]).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
@@ -195,11 +259,12 @@ public final class RtSkyLut {
                         .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .pImageInfo(VkDescriptorImageInfo.create(images.address(binding), 1));
             }
-            long[] sampledViews = {transmittance.view, multiScatter.view};
-            int[] sampledBindings = {SKY_LUT_TRANSMITTANCE_SAMPLER, SKY_LUT_MULTISCATTER_SAMPLER};
+            long[] sampledViews = {transmittance.view, multiScatter.view,
+                    cloudShapeNoise.view, cloudCurlNoise.view};
+            long[] sampledSamplers = {sampler, sampler, noiseSampler, noiseSampler};
             for (int i = 0; i < sampledViews.length; i++) {
                 int binding = sampledBindings[i];
-                images.get(binding).imageView(sampledViews[i]).sampler(sampler)
+                images.get(binding).imageView(sampledViews[i]).sampler(sampledSamplers[i])
                         .imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 writes.get(binding).sType$Default().dstSet(descriptorSet).dstBinding(binding)
                         .descriptorCount(1)
@@ -208,9 +273,10 @@ public final class RtSkyLut {
             }
             VK10.vkUpdateDescriptorSets(vk, writes, null);
 
-            return new RtSkyLut(ctx, transmittance, multiScatter, skyView, sampler, descriptorSetLayout,
+            return new RtSkyLut(ctx, transmittance, multiScatter, skyView, cloudDome, cloudShapeNoise,
+                    cloudCurlNoise, sampler, cloudDomeSampler, noiseSampler, descriptorSetLayout,
                     descriptorPool, descriptorSet, pipelineLayout, transmittancePipeline,
-                    multiScatterPipeline, skyViewPipeline);
+                    multiScatterPipeline, skyViewPipeline, cloudsPipeline, noise3dPipeline);
         }
     }
 
@@ -226,12 +292,33 @@ public final class RtSkyLut {
         return skyView.view;
     }
 
+    public long cloudDomeView() {
+        return cloudDome.view;
+    }
+
+    public long cloudDomeSampler() {
+        return cloudDomeSampler;
+    }
+
+    public long cloudShapeNoiseView() {
+        return cloudShapeNoise.view;
+    }
+
+    public long cloudCurlNoiseView() {
+        return cloudCurlNoise.view;
+    }
+
+    public long cloudNoiseSampler() {
+        return noiseSampler;
+    }
+
     /**
-     * Record this frame's sky LUT work: the two static LUTs on the first frame, then the sky-view LUT.
-     * Must be recorded before the trace, with a barrier after (the caller's) — the miss and raygen stages
-     * sample all of these.
+     * Record this frame's sky LUT work: the two static LUTs on the first frame, then the sky-view LUT,
+     * then (in the overworld) the volumetric cloud dome. Must be recorded before the trace, with a
+     * barrier after (the caller's) — the miss and raygen stages sample all of these. The cloud dome is
+     * skipped outside the overworld because no stage samples it there.
      */
-    public void record(VkCommandBuffer cmd, long worldPushAddress) {
+    public void record(VkCommandBuffer cmd, long worldPushAddress, boolean overworld) {
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "sky LUTs")) {
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -241,6 +328,10 @@ public final class RtSkyLut {
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
 
             if (!staticLutsBaked) {
+                // The cloud noise volumes are static: baked once with the static LUTs, then only sampled.
+                dispatch3d(cmd, stack, noise3dPipeline,
+                        SHAPE_NOISE_SIZE / NOISE_GROUP_SIZE, SHAPE_NOISE_SIZE / NOISE_GROUP_SIZE,
+                        SHAPE_NOISE_SIZE / NOISE_GROUP_SIZE);
                 dispatch(cmd, stack, transmittancePipeline, TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
                 // The multiple-scattering bake samples the transmittance LUT the previous dispatch just
                 // wrote, and the sky-view bake samples both.
@@ -248,6 +339,9 @@ public final class RtSkyLut {
                 staticLutsBaked = true;
             }
             dispatch(cmd, stack, skyViewPipeline, SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+            if (overworld) {
+                dispatch(cmd, stack, cloudsPipeline, CLOUD_DOME_WIDTH, CLOUD_DOME_HEIGHT);
+            }
         }
     }
 
@@ -258,18 +352,31 @@ public final class RtSkyLut {
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
     }
 
+    private void dispatch3d(VkCommandBuffer cmd, MemoryStack stack, long pipeline, int gx, int gy, int gz) {
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        VK10.vkCmdDispatch(cmd, gx, gy, gz);
+        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+    }
+
     public void destroy() {
         if (destroyed) {
             return;
         }
         VkDevice vk = ctx.vk();
+        VK10.vkDestroyPipeline(vk, noise3dPipeline, null);
+        VK10.vkDestroyPipeline(vk, cloudsPipeline, null);
         VK10.vkDestroyPipeline(vk, skyViewPipeline, null);
         VK10.vkDestroyPipeline(vk, multiScatterPipeline, null);
         VK10.vkDestroyPipeline(vk, transmittancePipeline, null);
         VK10.vkDestroyPipelineLayout(vk, pipelineLayout, null);
         VK10.vkDestroyDescriptorPool(vk, descriptorPool, null);
         VK10.vkDestroyDescriptorSetLayout(vk, descriptorSetLayout, null);
+        VK10.vkDestroySampler(vk, noiseSampler, null);
+        VK10.vkDestroySampler(vk, cloudDomeSampler, null);
         VK10.vkDestroySampler(vk, sampler, null);
+        cloudCurlNoise.destroy();
+        cloudShapeNoise.destroy();
+        cloudDome.destroy();
         skyView.destroy();
         multiScatter.destroy();
         transmittance.destroy();

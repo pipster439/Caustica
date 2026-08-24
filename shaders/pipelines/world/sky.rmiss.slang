@@ -6,6 +6,15 @@
 // Atmospheric scattering is amortized into the per-frame LUT. Analytic stars, airglow, and textured
 // celestial discs are combined with that physical result here.
 //
+// The volumetric clouds come from the per-frame dome bake (sky_lut/clouds.comp): one bilinear fetch
+// supplies the cloud in-scatter (RGB) and the layer's transmittance (A) along this ray. The atmosphere
+// behind the layer is attenuated by that A, stars are occluded by it, and the sun/moon discs are gated
+// by the same dome sampled at the body's direction — clouds only ever ATTENUATE, never emit extra light
+// toward the discs, so the PAYLOAD_SHOW_CELESTIAL anti-double-count contract is unchanged.
+//
+// Non-overworld dimensions have no atmosphere: the sky is the attribute probe's per-dimension colour
+// scaled by the look package's luminance anchor, the End keeps the starfield, and neither draws a disc.
+//
 // Celestial discs are gated by a packed payload flag, which raygen sets per-ray from the path state: true
 // on the primary ray and after every specular/dielectric bounce (so the sun/moon appear in water, glass
 // and metal reflections/refractions), false after a diffuse vertex did sun/moon NEE — otherwise the disc
@@ -13,6 +22,7 @@
 // are added on every miss at any bounce: stars are not a NEE light, so they never double-count.
 import world_common;
 import sky;
+import clouds;
 import bindings;
 
 // Vanilla celestials atlas (sun + moon-phase sprites), bound by RtComposite. Sampled with an explicit LOD
@@ -99,6 +109,27 @@ float3 skyDome(float3 dir, SkyState state) {
     return skyViewLut.SampleLevel(sunUv, 0.0).rgb + skyViewLut.SampleLevel(moonUv, 0.0).rgb;
 }
 
+// Overcast grey (linear BT.709) added to the sky by rain, and the whiter flash tint lightning adds.
+static const float3 OVERCAST_GREY = float3(0.62, 0.66, 0.74);
+static const float3 FLASH_GREY = float3(0.78, 0.80, 0.86);
+
+// Cloud transmittance toward a celestial body, averaged over a few taps of the dome across the DRAWN
+// disc's angular size. The drawn quad spans ~17 degrees, far wider than one dome texel, so a single
+// sample could hide the whole disc behind a thin cloud edge; the average keeps the occlusion soft at the
+// disc's own scale.
+float celestialCloudTransmittance(SkyState state, float3 bodyDir, float halfAngle) {
+    float3 right;
+    float3 up;
+    celestialSquareFrame(bodyDir, right, up);
+    float k = tan(halfAngle) * 0.45;
+    float t = cloudDomeLut.SampleLevel(cloudDomeUv(bodyDir), 0.0).a;
+    t += cloudDomeLut.SampleLevel(cloudDomeUv(normalize(bodyDir + right * k)), 0.0).a;
+    t += cloudDomeLut.SampleLevel(cloudDomeUv(normalize(bodyDir - right * k)), 0.0).a;
+    t += cloudDomeLut.SampleLevel(cloudDomeUv(normalize(bodyDir + up * k)), 0.0).a;
+    t += cloudDomeLut.SampleLevel(cloudDomeUv(normalize(bodyDir - up * k)), 0.0).a;
+    return t / 5.0;
+}
+
 [shader("miss")]
 void main(inout Payload payload) {
     WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
@@ -106,49 +137,77 @@ void main(inout Payload payload) {
     float3 dir = normalize(WorldRayDirection());
     bool showCelestial = (payload.flags & PAYLOAD_SHOW_CELESTIAL) != 0u;
 
-    float3 color = skyDome(dir, state);
-    // Airglow plus integrated unresolved starlight: the real floor of a moonless night sky (~1e-3 cd/m²),
-    // isotropic because it is emitted by the upper atmosphere itself rather than scattered from a body.
-    // Multiple scattering is in the LUT, so this remains a flat, physically small constant.
-    color += state.airglowLuminance;
+    float3 color;
+    if (state.dimension == DIMENSION_OVERWORLD) {
+        // Sample the 1024x512 volumetric cloud dome (RGB = in-scattered radiance, A = transmittance).
+        float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(dir), 0.0);
+        float3 cloudT = float3(cloudDome.a);
+        float3 cloudColor = cloudDome.rgb;
+        color = skyDome(dir, state) * cloudT + cloudColor;
+        // Airglow plus integrated unresolved starlight: the real floor of a moonless night sky (~1e-3
+        // cd/m²), isotropic because it is emitted by the upper atmosphere itself rather than scattered
+        // from a body. Multiple scattering is in the LUT, so this remains a flat, physically small
+        // constant.
+        color += state.airglowLuminance;
+        // Weather: rain lifts the sky toward a flat overcast grey; a lightning flash does the same
+        // briefly in a whiter tint. Both sit on top of the physical sky so terrain (via miss rays) and
+        // the dome stay one consistent ambient. The grey is lit by the celestial bodies like the clouds
+        // are, so a rainy night stays dark instead of glowing at the daylight grey level.
+        float greyLit = saturate(state.sunIlluminance / 128000.0 + state.moonIlluminance * 0.01);
+        color += OVERCAST_GREY * state.rain * state.weatherGreyLum * greyLit;
+        color += FLASH_GREY * state.flash * state.weatherGreyLum;
 
-    // Extinction along the view ray: stars redden and dim into the horizon on exactly the curve the sky
-    // itself follows, because it is the same LUT that produced the sky. Zero angular radius — a star is a
-    // point, so it sets at the horizon line.
-    float3 extinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm, dir, 0.0);
-    color += stars(dir, state, extinction);
+        // Extinction along the view ray: stars redden and dim into the horizon on exactly the curve the
+        // sky itself follows, because it is the same LUT that produced the sky. Zero angular radius — a
+        // star is a point, so it sets at the horizon line. Clouds occlude stars with the same dome
+        // transmittance that attenuates the atmosphere.
+        float3 extinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm, dir, 0.0);
+        color += stars(dir, state, extinction) * cloudT;
 
-    if (showCelestial) {
-        float2 local;
-        if (celestialSquareLocal(dir, state.sunDir, state.sunDiscHalfAngle, local)) {
-            // Tint from the body's CENTRE, not from this ray. The drawn quad spans ~33 degrees (vanilla's
-            // size, not the real sun's half degree), so per-ray extinction would redden its lower limb by
-            // several stops relative to its upper one — an accurate answer to a question about a body that
-            // is 60x too large. The centre keeps the sprite one colour, as vanilla draws it.
-            float3 sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
-                    state.sunDir, state.sunAngularRadius);
-            float2 uv = lerp(state.sunUv.xy, state.sunUv.zw, local * 0.5 + 0.5);
-            float3 texel = celestialsAtlas.SampleLevel(uv, 0.0).rgb;
-            // Vanilla's sun sprite bakes a soft glow gradient into its texels; scaling that raw to HDR
-            // makes a huge ring around the disc. Raising the texture luminance to a high power keeps only
-            // the bright core and collapses the painted halo to ~0 — the real halo comes from the Mie
-            // in-scatter in the LUT, which is where it belongs.
-            float core = pow(clamp(dot(texel, texel) * 0.45, 0.0, 1.0), 6.0);
-            color += discRadiance(state.sunIlluminance, state.sunDiscHalfAngle) * sunExtinction * core;
+        if (showCelestial) {
+            float2 local;
+            if (celestialSquareLocal(dir, state.sunDir, state.sunDiscHalfAngle, local)) {
+                // Tint from the body's CENTRE, not from this ray. The drawn quad spans ~33 degrees
+                // (vanilla's size, not the real sun's half degree), so per-ray extinction would redden
+                // its lower limb by several stops relative to its upper one — an accurate answer to a
+                // question about a body that is 60x too large. The centre keeps the sprite one colour,
+                // as vanilla draws it.
+                float3 sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
+                        state.sunDir, state.sunAngularRadius);
+                float2 uv = lerp(state.sunUv.xy, state.sunUv.zw, local * 0.5 + 0.5);
+                float3 texel = celestialsAtlas.SampleLevel(uv, 0.0).rgb;
+                // Vanilla's sun sprite bakes a soft glow gradient into its texels; scaling that raw to
+                // HDR makes a huge ring around the disc. Raising the texture luminance to a high power
+                // keeps only the bright core and collapses the painted halo to ~0 — the real halo comes
+                // from the Mie in-scatter in the LUT, which is where it belongs.
+                float core = pow(clamp(dot(texel, texel) * 0.45, 0.0, 1.0), 6.0);
+                float cloudT = celestialCloudTransmittance(state, state.sunDir, state.sunDiscHalfAngle);
+                color += discRadiance(state.sunIlluminance, state.sunDiscHalfAngle)
+                       * sunExtinction * core * cloudT;
+            }
+            if (celestialSquareLocal(dir, state.moonDir, state.moonDiscHalfAngle, local)) {
+                float2 uv = lerp(state.moonUv.xy, state.moonUv.zw, local * 0.5 + 0.5);
+                float3 texel = srgbToLinear(celestialsAtlas.SampleLevel(uv, 0.0).rgb);
+                float3 moonExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
+                        state.moonDir, state.moonAngularRadius);
+                // The phase sprite already carries the lit shape; a contrast ramp suppresses its faint
+                // painted halo while keeping that shape.
+                float shape = smoothstep(0.0, 1.0, min(length(texel), 1.0));
+                float cloudT = celestialCloudTransmittance(state, state.moonDir, state.moonDiscHalfAngle);
+                color += discRadiance(state.moonIlluminance, state.moonDiscHalfAngle)
+                       * moonExtinction * texel * shape * cloudT;
+            }
+            // No separate horizon gate on either body. A set sun or moon goes dark because its extinction
+            // is zero below the horizon, matching the NEE visibility test.
         }
-        if (celestialSquareLocal(dir, state.moonDir, state.moonDiscHalfAngle, local)) {
-            float2 uv = lerp(state.moonUv.xy, state.moonUv.zw, local * 0.5 + 0.5);
-            float3 texel = srgbToLinear(celestialsAtlas.SampleLevel(uv, 0.0).rgb);
-            float3 moonExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
-                    state.moonDir, state.moonAngularRadius);
-            // The phase sprite already carries the lit shape; a contrast ramp suppresses its faint painted
-            // halo while keeping that shape.
-            float shape = smoothstep(0.0, 1.0, min(length(texel), 1.0));
-            color += discRadiance(state.moonIlluminance, state.moonDiscHalfAngle)
-                   * moonExtinction * texel * shape;
+    } else {
+        // No atmosphere outside the overworld: the probe's per-dimension sky colour, scaled to radiance
+        // by the look package's anchor. The End keeps the starfield (vanilla draws its sky texture and
+        // stars); the Nether has neither.
+        color = state.vanillaSkyColor * state.skyLuminanceCdM2;
+        if (state.dimension == DIMENSION_END && state.starLuminance > 0.0) {
+            color += stars(dir, state, float3(1.0));
         }
-        // No separate horizon gate on either body. A set sun or moon goes dark because its extinction is
-        // zero below the horizon, matching the NEE visibility test.
     }
 
     // The sky goes out in absolute scene units at full fp32 — packSky writes the payload's three surface

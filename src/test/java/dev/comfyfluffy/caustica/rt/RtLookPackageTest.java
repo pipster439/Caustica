@@ -8,17 +8,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class RtLookPackageTest {
     private static final String VALID = """
-            {"schemaVersion":4,"id":"test","packageVersion":1,
+            {"schemaVersion":5,"id":"test","packageVersion":1,
              "exposure":{"minEv":-15,"maxEv":-2,"curve":"-2:-3,2:-2,8:0,15:1"},
              "lmt":{"resource":"lmt.bin"},
              "bloom":{"strength":0.08,"thresholdSceneLinear":1,"softKneeFraction":0.5,"radius":1,
              "levels":6},
              "lighting":{"sunIlluminanceLux":128000,"moonIlluminanceLux":5,
              "blockEmissionLuminanceCdM2":2000,"nightAirglowLuminanceCdM2":0.002,
-             "starLuminanceCdM2":10,"moonPhaseFixedFraction":0.1},
+             "starLuminanceCdM2":10,"moonPhaseFixedFraction":0.1,
+             "netherSkyLuminanceCdM2":14,"endSkyLuminanceCdM2":1.5,"weatherSkyGreyCdM2":900},
              "sky":{"sunNoonSouthTiltDegrees":30,"sunAngularRadiusDegrees":0.6,
              "moonAngularRadiusDegrees":1.5,"sunDiscHalfAngleDegrees":16.7,
-             "moonDiscHalfAngleDegrees":11.31,"groundAlbedo":0.1,"horizonSoftenDegrees":15}}
+             "moonDiscHalfAngleDegrees":11.31,"groundAlbedo":0.1,"horizonSoftenDegrees":15,
+             "cloudCoverageBase":0.42}}
             """;
 
     @Test
@@ -27,11 +29,13 @@ final class RtLookPackageTest {
         assertEquals(6, look.bloom().levels());
         assertEquals(30.0f, look.sky().sunNoonSouthTiltDegrees());
         assertEquals(0.1f, look.sky().groundAlbedo());
+        assertEquals(14.0f, look.lighting().netherSkyLuminanceCdM2());
+        assertEquals(0.42f, look.sky().cloudCoverageBase());
     }
 
     @Test
     void rejectsUnknownSchema() {
-        assertThrows(IllegalArgumentException.class, () -> parse(VALID.replace("\"schemaVersion\":4",
+        assertThrows(IllegalArgumentException.class, () -> parse(VALID.replace("\"schemaVersion\":5",
                 "\"schemaVersion\":3")));
     }
 

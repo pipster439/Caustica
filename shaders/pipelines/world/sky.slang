@@ -466,8 +466,15 @@ public bool celestialSquareLocal(float3 dir, float3 bodyDir, float halfAngle, ou
 // ---- Per-frame sky state ------------------------------------------------------------------------
 //
 // WorldPush carries only what the CPU alone can know: Minecraft's four eased celestial angles, its star
-// brightness, the moon phase, and the immutable look-package constants. Every direction, colour, level,
+// brightness, the moon phase, the per-dimension sky/fog colours and distances from the attribute probe,
+// the weather levels, and the immutable look-package constants. Every direction, colour, level,
 // and transmittance is derived here so atmospheric physics has one implementation.
+
+// Dimension ids as pushed by RtComposite: the shader only distinguishes "has a physical atmosphere"
+// (the overworld) from everything else; nether and end each pick their own fog/star behaviour.
+public static const int DIMENSION_OVERWORLD = 0;
+public static const int DIMENSION_NETHER = 1;
+public static const int DIMENSION_END = 2;
 
 public struct SkyState {
     public float3 sunDir;
@@ -488,6 +495,20 @@ public struct SkyState {
     public float  moonPhaseIndex;      // 0 full .. 4 new
     public float4 sunUv;
     public float4 moonUv;
+    public int    dimension;           // DIMENSION_* id
+    public float  rain;                // 0..1 smoothed rain level
+    public float  thunder;             // 0..1 smoothed thunder level
+    public float  flash;               // 0..1 lightning sky flash (vanilla skyFlashTime decay)
+    public float  cloudCoverage;       // 0..1; rain raises it on the Java side
+    public float  cloudAltRebased;     // layer bottom, REBASED blocks (trace space)
+    public float  cloudTime;           // seconds, drives the wind advection
+    public float  cloudDt;             // seconds since the previous frame, drives the sky-guide motion
+    public float3 vanillaSkyColor;     // linear BT.709, normalized; the dimension's authored sky colour
+    public float  skyLuminanceCdM2;    // radiance anchor scaling vanillaSkyColor (non-overworld sky)
+    public float3 fogColor;            // linear BT.709, normalized
+    public float  fogStart;            // blocks
+    public float  fogEnd;              // blocks
+    public float  weatherGreyLum;      // cd/m² overcast grey added to the sky at full rain
 };
 
 /** Minecraft's moon phases run 0 = full to 4 = new, then mirror back toward full through phase 7. */
@@ -519,6 +540,36 @@ public SkyState skyState(WorldPush push) {
     s.moonPhaseIndex = push.skyLook2.w;
     s.sunUv = push.sunUv;
     s.moonUv = push.moonUv;
+
+    s.dimension = int(push.skyLook4.x);
+    s.rain = clamp(push.skyLook3.z, 0.0, 1.0);
+    s.thunder = clamp(push.skyLook3.w, 0.0, 1.0);
+    s.flash = clamp(push.skyLook4.w, 0.0, 1.0);
+    s.cloudCoverage = clamp(push.skyLook4.y, 0.0, 1.0);
+    s.cloudAltRebased = push.skyLook4.z;
+    s.cloudTime = push.skyLook7.z;
+    s.cloudDt = push.skyLook7.y;
+    s.vanillaSkyColor = push.skyLook5.xyz;
+    s.skyLuminanceCdM2 = push.skyLook5.w;
+    s.fogColor = push.skyLook6.xyz;
+    s.fogStart = push.skyLook6.w;
+    s.fogEnd = push.skyLook7.x;
+    s.weatherGreyLum = push.skyLook7.w;
+
+    if (s.dimension != DIMENSION_OVERWORLD) {
+        // No celestial light outside the overworld: the sun/moon never rise there, and vanilla draws
+        // neither disc. Zeroing the illuminances here (rather than at each consumer) also keeps the
+        // NEE shadow ray from firing for zero light.
+        s.sunIlluminance = 0.0;
+        s.moonIlluminance = 0.0;
+    } else {
+        // Weather dims the direct light (clouds handle their own shadowing separately, per shadow ray).
+        // The lightning flash briefly brightens the sun term so the whole scene flashes with the sky,
+        // which is how vanilla's sky flash reads on the world.
+        float weatherDim = 1.0 - 0.55 * s.rain;
+        s.sunIlluminance *= weatherDim * (1.0 + 0.6 * s.flash);
+        s.moonIlluminance *= weatherDim;
+    }
     return s;
 }
 
@@ -530,7 +581,9 @@ public struct CelestialLight {
 
 /**
  * The single directional light NEE samples: whichever of the two bodies actually delivers more light
- * after atmospheric extinction.
+ * after atmospheric extinction. Outside the overworld both illuminances are already zero (skyState
+ * gates them), so this returns a zero-illuminance light and the NEE shadow ray is skipped by its
+ * illuminance gate.
  *
  * <p>There is deliberately no crossfade between them. The extinction along a horizon-grazing path is
  * enormous (roughly 70 air masses), so both bodies are already within a rounding error of zero at the

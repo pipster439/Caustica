@@ -49,6 +49,9 @@ public final class RtVideoOptions {
             entities(),
             particles(),
             waterWaves(),
+            volumetricClouds(),
+            weatherEffects(),
+            volumetricFog(),
             dlssQuality()
         ));
         if (CausticaConfig.Rt.Hdr.swapchainPqAvailable()) {
@@ -133,6 +136,18 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> waterWaves() {
         return bool("caustica.options.rt.waterWaves", CausticaConfig.Rt.Composite.WATER_WAVES);
+    }
+
+    private static OptionInstance<Boolean> volumetricClouds() {
+        return bool("caustica.options.rt.volumetricClouds", CausticaConfig.Rt.Composite.VOLUMETRIC_CLOUDS);
+    }
+
+    private static OptionInstance<Boolean> weatherEffects() {
+        return bool("caustica.options.rt.weatherEffects", CausticaConfig.Rt.Composite.WEATHER_EFFECTS);
+    }
+
+    private static OptionInstance<Boolean> volumetricFog() {
+        return bool("caustica.options.rt.volumetricFog", CausticaConfig.Rt.Composite.VOLUMETRIC_FOG);
     }
 
     private static OptionInstance<Integer> dlssQuality() {

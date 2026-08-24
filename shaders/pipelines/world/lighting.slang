@@ -8,6 +8,8 @@ import world_core;
 import bindings;
 import math;
 import trace;
+import sky;
+import clouds;
 
 public struct Reservoir {
     public float3 pos;  // light sample point (rebased world space)
@@ -324,3 +326,17 @@ public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, flo
 //   bit 0 (0x01) — secondary rays: shadows, GI bounces, reflections.
 //   bit 1 (0x02) — the primary camera ray.
 // Terrain / entities / block entities keep 0xFF (both bits). Particles use 0x02: primary-visible
+
+// Cloud shadowing for the celestial NEE light. A shadow ray that reached the sky crossed the cloud
+// layer on the way, so it folds the layer's Beer-Lambert transmittance (evaluated at the crossing's
+// midpoint — see clouds.slang) into the light. This is what dims sun/moonlight under clouds and paints
+// the moving soft shadows on terrain; it shares the dome bake's density field, so the visible clouds
+// and the light they block can never disagree. No-op outside the overworld or with clouds off.
+public float celestialCloudShadow(float3 origin, float3 lightDir) {
+    if (worldPush.skyLook4.x != float(DIMENSION_OVERWORLD) || worldPush.skyLook4.y <= 0.0) {
+        return 1.0;
+    }
+    return cloudTransmittanceToward(origin, lightDir, worldPush.waterAnchor.xy,
+            worldPush.skyLook4.z, worldPush.skyLook4.y, worldPush.skyLook7.z,
+            cloudShapeNoise, cloudCurlNoise);
+}

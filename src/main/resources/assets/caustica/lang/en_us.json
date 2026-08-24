@@ -30,6 +30,15 @@
 	"caustica.options.rt.waterWaves": "Animated Water",
 	"caustica.options.rt.waterWaves.tooltip": "Animate water-surface normals for moving wave highlights.",
 
+	"caustica.options.rt.volumetricClouds": "Volumetric Clouds",
+	"caustica.options.rt.volumetricClouds.tooltip": "Ray-traced volumetric clouds that drift with the wind, occlude the sun and moon, and cast soft moving shadows on terrain.",
+
+	"caustica.options.rt.weatherEffects": "Weather Effects",
+	"caustica.options.rt.weatherEffects.tooltip": "Rain and thunderstorm levels change sky light: rain dims the sun, greys the sky and thickens the haze; lightning briefly flashes the sky.",
+
+	"caustica.options.rt.volumetricFog": "Volumetric Fog",
+	"caustica.options.rt.volumetricFog.tooltip": "Distance fog matching each dimension's vanilla haze (Nether red fog, End darkness) plus rain haze in the overworld.",
+
 	"caustica.options.rt.hdr": "HDR Output",
 	"caustica.options.rt.hdr.tooltip": "Recreate the swapchain for HDR (ST.2084/PQ) or native SDR output. Applied at the next frame boundary.",
 

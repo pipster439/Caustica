@@ -64,7 +64,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         int texSlot = int(epr.tint.w + 0.5);
         float4 texel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(uv, 0.0);
         bool stochasticAlpha = false;
-        MaterialHeader materialHeader;
+        // Initialized so the guarded reads below are provably defined: they run exactly when this was
+        // assigned, but the compiler cannot correlate the instance-kind test with the assignment.
+        MaterialHeader materialHeader = {};
         if (instanceKind == ENTITY_BIT) {
             materialHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[epr.materialId];
             stochasticAlpha = (materialHeader.features & MATERIAL_FEATURE_STOCHASTIC_ALPHA) != 0u;
