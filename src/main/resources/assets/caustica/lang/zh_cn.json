@@ -9,6 +9,9 @@
 	"caustica.options.rt.manualEv": "曝光 EV",
 	"caustica.options.rt.manualEv.tooltip": "以档位为单位的曝光补偿。手动模式下这是固定曝光；自动模式下会让自动曝光更亮或更暗。",
 
+	"caustica.options.rt.gamma": "伽马",
+	"caustica.options.rt.gamma.tooltip": "变换后亮度伽马。低于 1.00 的值可在保留纯黑、纯白及色彩比例的同时提亮阴影与中间调。",
+
 	"caustica.options.rt.spp": "每像素采样数",
 	"caustica.options.rt.spp.tooltip": "每帧对每个像素进行的路径追踪采样数。数值越高画面越干净，但负载也越高。",
 
@@ -27,14 +30,23 @@
 	"caustica.options.rt.waterWaves": "动态水面",
 	"caustica.options.rt.waterWaves.tooltip": "对水面法线进行动画处理，以显示移动波浪高光。",
 
-	"caustica.options.rt.hdr": "HDR 输出",
-	"caustica.options.rt.hdr.tooltip": "当显示器支持时，以 HDR (ST.2084/PQ) 而不是 SDR 显示。重启游戏后生效。",
+	"caustica.options.rt.volumetricClouds": "体积云",
+	"caustica.options.rt.volumetricClouds.tooltip": "光线追踪体积云，随风飘动，遮挡日月，并在地面投射柔和的动态阴影。",
 
-	"caustica.options.rt.hdrPaperWhite": "HDR 纸白亮度",
-	"caustica.options.rt.hdrPaperWhite.tooltip": "SDR 等效场景亮度在 HDR 显示器上映射到的绝对亮度（nits）。",
+	"caustica.options.rt.weatherEffects": "天气效果",
+	"caustica.options.rt.weatherEffects.tooltip": "降雨与雷暴会改变天空光照：降雨使太阳变暗、天空泛灰并加厚薄雾；闪电会短暂照亮天空。",
+
+	"caustica.options.rt.volumetricFog": "体积雾",
+	"caustica.options.rt.volumetricFog.tooltip": "匹配各维度原版雾气的距离雾（下界红雾、末地黑暗）以及主世界的雨雾。",
+
+	"caustica.options.rt.hdr": "HDR 输出",
+	"caustica.options.rt.hdr.tooltip": "为 HDR (ST.2084/PQ) 或原生 SDR 输出重建交换链。在下一帧边界生效。",
+
+	"caustica.options.rt.hdrUiBrightness": "HDR 界面亮度",
+	"caustica.options.rt.hdrUiBrightness.tooltip": "在 HDR 显示器上为 SDR 界面指定的绝对亮度（单位：nits）。",
 
 	"caustica.options.rt.hdrPeak": "HDR 峰值亮度",
-	"caustica.options.rt.hdrPeak.tooltip": "高光回落目标的绝对亮度（nits）。请设为显示器的 HDR 峰值亮度。",
+	"caustica.options.rt.hdrPeak.tooltip": "高光回落目标的绝对亮度（单位：nits）。请设为显示器的 HDR 峰值亮度。",
 
 	"caustica.options.rt.dlssQuality": "DLSS 质量",
 	"caustica.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction 质量模式。较低质量模式会渲染更少像素并进行更激进的升频，以获得更高帧率；较高质量模式会渲染更多像素，以获得更清晰的图像。仅在启用 DLSS Ray Reconstruction 时影响画面。",
@@ -45,7 +57,7 @@
 	"caustica.options.rt.dlssQuality.5": "DLAA",
 
 	"caustica.options.rt.debugView": "调试视图",
-	"caustica.options.rt.debugView.tooltip": "显示光线追踪的中间缓冲区，而不是最终图像。",
+	"caustica.options.rt.debugView.tooltip": "在常规帧渲染完成后，检查光线追踪缓冲区与曝光诊断信息。",
 	"caustica.options.rt.debugView.0": "关闭",
 	"caustica.options.rt.debugView.1": "法线",
 	"caustica.options.rt.debugView.2": "反照率",
@@ -53,5 +65,7 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "运动",
 	"caustica.options.rt.debugView.6": "高光",
-	"caustica.options.rt.debugView.7": "高光运动"
+	"caustica.options.rt.debugView.7": "高光运动",
+	"caustica.options.rt.debugView.8": "曝光伪色彩",
+	"caustica.options.rt.debugView.9": "测光权重"
 }
