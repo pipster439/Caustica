@@ -318,39 +318,39 @@ public float cloudSegmentTransmittance(float3 origin, float3 dir, float maxT, fl
 }
 
 /**
- * Continuous Orthographic Hemispherical Projection:
- * Left square (uv.x in [0, 0.5]): Upper sky dome (dy >= 0).
- * Right square (uv.x in [0.5, 1.0]): Lower ground hemisphere (dy < 0).
- * Zenith (0, 1, 0) maps to the exact continuous center (0.25, 0.50).
- * The mapping uv = dir.xz * 0.49 + 0.5 is strictly linear and isotropic everywhere around zenith.
- * Completely eliminates all pyramid creases, polar vortices, and seam lines.
+ * Dual-paraboloid hemispherical projection:
+ * Left square (uv.x in [0, 0.5]): upper sky dome (dy >= 0).
+ * Right square (uv.x in [0.5, 1.0]): lower ground hemisphere (dy < 0).
+ *
+ * The previous orthographic projection reconstructed y as sqrt(1 - r²). Its derivative becomes
+ * infinite at r=1, so adjacent dome texels represented sharply different elevations at the horizon.
+ * Independent march jitter then exposed those texels as vertical stripes. Dual paraboloid uses
+ * y=(1-r²)/(1+r²), which has a finite derivative at both the pole and horizon.
  */
 public float2 cloudDomeUv(float3 dir) {
-    if (dir.y >= 0.0) {
-        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
-        return float2(local.x * 0.5, local.y);
-    } else {
-        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
-        return float2(0.5 + local.x * 0.5, local.y);
-    }
+    float2 p = dir.xz / max(1.0 + abs(dir.y), 1.0e-6);
+    float2 local = clamp(p * 0.49 + 0.5, 0.005, 0.995);
+    return dir.y >= 0.0
+            ? float2(local.x * 0.5, local.y)
+            : float2(0.5 + local.x * 0.5, local.y);
 }
 
 public float3 cloudDomeDir(float2 uv) {
-    if (uv.x < 0.5) {
-        float2 local = float2(uv.x * 2.0, uv.y);
-        float2 p = (local - 0.5) / 0.49;
-        float r2 = dot(p, p);
-        float dy = sqrt(max(0.0, 1.0 - min(r2, 1.0)));
-        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
-        return float3(p.x * s, dy, p.y * s);
-    } else {
-        float2 local = float2((uv.x - 0.5) * 2.0, uv.y);
-        float2 p = (local - 0.5) / 0.49;
-        float r2 = dot(p, p);
-        float dy = -sqrt(max(0.0, 1.0 - min(r2, 1.0)));
-        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
-        return float3(p.x * s, dy, p.y * s);
+    bool upper = uv.x < 0.5;
+    float2 local = upper
+            ? float2(uv.x * 2.0, uv.y)
+            : float2((uv.x - 0.5) * 2.0, uv.y);
+    float2 p = (local - 0.5) / 0.49;
+    float r2 = dot(p, p);
+    if (r2 > 1.0) {
+        p *= rsqrt(r2);
+        r2 = 1.0;
     }
+
+    float invDenom = 1.0 / (1.0 + r2);
+    float2 xz = 2.0 * p * invDenom;
+    float y = (1.0 - r2) * invDenom;
+    return float3(xz.x, upper ? y : -y, xz.y);
 }
 
 // Production dual-lobe cloud phase: forward HG lobe, backscatter lobe, and anti-solar silver lining boost.
