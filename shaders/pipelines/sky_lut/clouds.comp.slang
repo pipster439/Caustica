@@ -118,7 +118,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 ? tid.x : tid.x - uint(CLOUD_DOME_HEMISPHERE_W);
         float randomJitter = frac(sin(dot(float2(float(localX), float(tid.y)),
                 float2(12.9898, 78.233))) * 43758.5453);
-        float jitterWeight = smoothstep(0.02, 0.12, abs(dir.y));
+        // Base the transition on the actual integration spacing rather than angle alone. Long cloud
+        // segments remain capped at 4 km for several degrees above the horizon, so angle-based fading
+        // still left enough random offset there to produce the observed bars.
+        float jitterWeight = 1.0 - smoothstep(12.0, 24.0, dt);
         float jitter = lerp(0.5, randomJitter, jitterWeight);
         for (int i = 0; i < CLOUD_MARCH_STEPS; i++) {
             if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.01) {

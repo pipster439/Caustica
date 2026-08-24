@@ -140,7 +140,7 @@ void main(inout Payload payload) {
     float3 color;
     if (state.dimension == DIMENSION_OVERWORLD) {
         // Sample the volumetric cloud dome (RGB = in-scattered radiance, A = transmittance).
-        float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(dir), 0.0);
+        float4 cloudDome = sampleCloudDomeFiltered(cloudDomeLut, dir);
         float baseT = cloudDome.a;
         float3 baseColor = cloudDome.rgb;
 

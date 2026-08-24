@@ -353,6 +353,36 @@ public float3 cloudDomeDir(float2 uv) {
     return float3(xz.x, upper ? y : -y, xz.y);
 }
 
+// The dome has no mip chain, while grazing cloud rays cover a very long and anisotropic footprint.
+// A single bilinear lookup therefore exposes individual azimuth texels as vertical bars at eye level.
+// Apply a small azimuthal footprint only near the horizon; away from it this is exactly one lookup and
+// retains the full cloud detail. Rotating the direction also keeps the filter correct around the whole
+// circular horizon, unlike applying a fixed offset in atlas UV space.
+public float4 sampleCloudDomeFiltered(Sampler2D dome, float3 dir) {
+    float4 center = dome.SampleLevel(cloudDomeUv(dir), 0.0);
+    float horizonWeight = 1.0 - smoothstep(0.03, 0.12, abs(dir.y));
+    if (horizonWeight <= 0.0) {
+        return center;
+    }
+
+    static const float AZIMUTH_TEXEL = 0.0032;
+    float s = sin(AZIMUTH_TEXEL);
+    float c = cos(AZIMUTH_TEXEL);
+    float s2 = 2.0 * s * c;
+    float c2 = c * c - s * s;
+    float2 xz = dir.xz;
+    float3 leftDir = float3(c * xz.x + s * xz.y, dir.y, -s * xz.x + c * xz.y);
+    float3 rightDir = float3(c * xz.x - s * xz.y, dir.y, s * xz.x + c * xz.y);
+    float3 farLeftDir = float3(c2 * xz.x + s2 * xz.y, dir.y, -s2 * xz.x + c2 * xz.y);
+    float3 farRightDir = float3(c2 * xz.x - s2 * xz.y, dir.y, s2 * xz.x + c2 * xz.y);
+    float4 filtered = center * 0.375
+            + dome.SampleLevel(cloudDomeUv(leftDir), 0.0) * 0.25
+            + dome.SampleLevel(cloudDomeUv(rightDir), 0.0) * 0.25
+            + dome.SampleLevel(cloudDomeUv(farLeftDir), 0.0) * 0.0625
+            + dome.SampleLevel(cloudDomeUv(farRightDir), 0.0) * 0.0625;
+    return lerp(center, filtered, horizonWeight);
+}
+
 // Production dual-lobe cloud phase: forward HG lobe, backscatter lobe, and anti-solar silver lining boost.
 public float cloudPhase(float cosTheta) {
     float g = 0.85;
