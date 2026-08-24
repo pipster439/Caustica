@@ -342,11 +342,12 @@ public float3 cloudDomeDir(float2 uv) {
             : float2((uv.x - 0.5) * 2.0, uv.y);
     float2 p = (local - 0.5) / 0.49;
     float r2 = dot(p, p);
-    if (r2 > 1.0) {
-        p *= rsqrt(r2);
-        r2 = 1.0;
-    }
 
+    // Do not clamp the square's pixels outside the unit disc onto r=1. Doing so makes every pixel in
+    // the four corners another independently marched horizon ray. The whole outside region then acts
+    // as a noisy, many-to-one horizon border and leaks vertical bars through bilinear filtering.
+    // Dual-paraboloid naturally continues through r=1 into the opposite hemisphere, giving the valid
+    // disc a smooth guard band instead.
     float invDenom = 1.0 / (1.0 + r2);
     float2 xz = 2.0 * p * invDenom;
     float y = (1.0 - r2) * invDenom;
