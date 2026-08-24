@@ -2,6 +2,7 @@ import javax.inject.Inject
 import org.gradle.process.ExecOperations
 import dev.comfyfluffy.caustica.build.GenerateShaderRecords
 import dev.comfyfluffy.caustica.build.GenerateRtBindings
+import dev.comfyfluffy.caustica.build.HotswapTask
 
 plugins {
 	id "fabric-loom" version "${loom_version}"
@@ -210,6 +211,13 @@ def generateRtBindings = tasks.register("generateRtBindings", GenerateRtBindings
 
 tasks.named("test", Test) {
 	useJUnitPlatform()
+}
+
+def hotswap = tasks.register("hotswap", HotswapTask) {
+	group = "development"
+	description = "Hot-swaps compiled Java classes into the running Minecraft JVM via JDWP (port 5005)."
+	classesDir = sourceSets.main.java.classesDirectory
+	dependsOn "compileJava"
 }
 
 sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/shaderRecords")).builtBy(generateShaderRecords))

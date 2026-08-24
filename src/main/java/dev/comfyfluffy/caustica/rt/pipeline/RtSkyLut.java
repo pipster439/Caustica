@@ -69,8 +69,8 @@ public final class RtSkyLut {
     public static final int SKY_VIEW_BODY_COUNT = 2;
     public static final int SKY_VIEW_HEIGHT = SKY_VIEW_SLICE_HEIGHT * SKY_VIEW_BODY_COUNT;
     // Keep in lock-step with shaders/pipelines/sky_lut/clouds.comp.slang.
-    public static final int CLOUD_DOME_WIDTH = 1024;
-    public static final int CLOUD_DOME_HEIGHT = 512;
+    public static final int CLOUD_DOME_WIDTH = 1280;
+    public static final int CLOUD_DOME_HEIGHT = 640;
     // Keep in lock-step with shaders/pipelines/sky_lut/noise3d.comp.slang.
     public static final int SHAPE_NOISE_SIZE = 128;
     public static final int CURL_NOISE_SIZE = 64;

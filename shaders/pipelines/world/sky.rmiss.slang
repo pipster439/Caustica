@@ -36,9 +36,9 @@ import bindings;
 // glossy lobe. Deriving from illuminance keeps the drawn body's total power equal to the real one's at
 // whatever size it is drawn, and costs nothing visually: the result still sits ~15 EV over an 18%-grey
 // noon surface, which the ACES 2.0 output transform renders as pure white either way.
-float3 discRadiance(float illuminance, float halfAngle) {
-    float side = 2.0 * tan(halfAngle);      // the square spans this much on a side, gnomonically
-    return float3(illuminance / max(side * side, 1.0e-8));
+float discRadiance(float illuminance, float halfAngle) {
+    float solidAngle = 2.0 * SKY_PI * (1.0 - cos(halfAngle));
+    return illuminance / max(solidAngle, 1.0e-8);
 }
 
 // Dave Hoskins' hash13 (https://www.shadertoy.com/view/4djSRW): well-distributed and pattern-free.
@@ -139,10 +139,45 @@ void main(inout Payload payload) {
 
     float3 color;
     if (state.dimension == DIMENSION_OVERWORLD) {
-        // Sample the 1024x512 volumetric cloud dome (RGB = in-scattered radiance, A = transmittance).
+        // Sample the volumetric cloud dome (RGB = in-scattered radiance, A = transmittance).
         float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(dir), 0.0);
-        float3 cloudT = float3(cloudDome.a);
-        float3 cloudColor = cloudDome.rgb;
+        float baseT = cloudDome.a;
+        float3 baseColor = cloudDome.rgb;
+
+        float alt = state.cloudAltRebased;
+
+        // 4K Ray-rate edge re-contouring & high-frequency micro-erosion
+        float tEnter, tExit;
+        float edgeWeight = smoothstep(0.01, 0.15, baseT) * smoothstep(0.99, 0.85, baseT);
+        if (edgeWeight > 0.0 && intersectCloudLayer(worldPush.camOffset.xyz, dir, alt, alt + CLOUD_THICKNESS_BLOCKS, tEnter, tExit)) {
+            float3 pEnter = worldPush.camOffset.xyz + dir * tEnter + float3(worldPush.waterAnchor.x, 0.0, worldPush.waterAnchor.y);
+            float erosion = cloudErosionNoise3D(cloudShapeNoise, pEnter * 0.0035);
+            baseT = saturate(baseT + (erosion - 0.5) * 0.25 * edgeWeight);
+        }
+
+        // 4K Native high-altitude cirrus evaluation (fine crystal fibers)
+        float cirrusAlt = alt + CIRRUS_ALT_OFFSET + CIRRUS_THICKNESS * 0.5;
+        if (dir.y > 0.015 && worldPush.camOffset.y < cirrusAlt && baseT > 0.05) {
+            float tCirrus = (cirrusAlt - worldPush.camOffset.y) / dir.y;
+            if (tCirrus < 30000.0) {
+                float3 pCirrus = worldPush.camOffset.xyz + dir * tCirrus;
+                float cirrusDensity = highCloudDensityAt(pCirrus, worldPush.waterAnchor.xy, alt,
+                        state.cloudCoverage, state.cloudTime, cloudShapeNoise, cloudCurlNoise);
+                if (cirrusDensity > 0.0) {
+                    float cirrusT = exp(-cirrusDensity * 0.30);
+                    float3 sunTint = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm, state.sunDir, state.sunAngularRadius);
+                    float3 lightColor = float3(state.sunIlluminance) * sunTint;
+                    float3 ambientSky = skyDome(dir, state);
+                    float3 cirrusLit = lightColor * (cloudPhase(dot(dir, state.sunDir)) * 0.85 + 0.15) + ambientSky * 0.65;
+                    float3 cirrusScatter = cirrusLit * (1.0 - cirrusT);
+                    baseColor += baseT * cirrusScatter;
+                    baseT *= cirrusT;
+                }
+            }
+        }
+
+        float3 cloudT = float3(baseT);
+        float3 cloudColor = baseColor;
         color = skyDome(dir, state) * cloudT + cloudColor;
         // Airglow plus integrated unresolved starlight: the real floor of a moonless night sky (~1e-3
         // cd/m²), isotropic because it is emitted by the upper atmosphere itself rather than scattered
@@ -165,40 +200,98 @@ void main(inout Payload payload) {
         color += stars(dir, state, extinction) * cloudT;
 
         if (showCelestial) {
-            float2 local;
-            if (celestialSquareLocal(dir, state.sunDir, state.sunDiscHalfAngle, local)) {
-                // Tint from the body's CENTRE, not from this ray. The drawn quad spans ~33 degrees
-                // (vanilla's size, not the real sun's half degree), so per-ray extinction would redden
-                // its lower limb by several stops relative to its upper one — an accurate answer to a
-                // question about a body that is 60x too large. The centre keeps the sprite one colour,
-                // as vanilla draws it.
-                float3 sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
-                        state.sunDir, state.sunAngularRadius);
-                float2 uv = lerp(state.sunUv.xy, state.sunUv.zw, local * 0.5 + 0.5);
-                float3 texel = celestialsAtlas.SampleLevel(uv, 0.0).rgb;
-                // Vanilla's sun sprite bakes a soft glow gradient into its texels; scaling that raw to
-                // HDR makes a huge ring around the disc. Raising the texture luminance to a high power
-                // keeps only the bright core and collapses the painted halo to ~0 — the real halo comes
-                // from the Mie in-scatter in the LUT, which is where it belongs.
-                float core = pow(clamp(dot(texel, texel) * 0.45, 0.0, 1.0), 6.0);
-                float cloudT = celestialCloudTransmittance(state, state.sunDir, state.sunDiscHalfAngle);
-                color += discRadiance(state.sunIlluminance, state.sunDiscHalfAngle)
-                       * sunExtinction * core * cloudT;
+            float sunCos = dot(dir, state.sunDir);
+            float3 sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
+                    state.sunDir, state.sunAngularRadius);
+            float sunCloudT = celestialCloudTransmittance(state, state.sunDir, 0.015);
+
+            // ---- Realistic Circular Sun Disc, Solar Limb Darkening, Corona & Lens Flare
+            if (sunCos > 0.0 && sunCloudT > 1.0e-4) {
+                float sunAngle = acos(clamp(sunCos, -1.0, 1.0));
+                float sunRadius = 0.016; // Angular radius (~0.92 deg)
+                float sunRho = sunAngle / sunRadius;
+
+                float3 directSun = float3(0.0);
+                // 1. Sun disc with physical limb darkening (Hestroffer & Magnan)
+                if (sunRho <= 1.0) {
+                    float mu = sqrt(max(0.0, 1.0 - sunRho * sunRho));
+                    float limb = 1.0 - 0.60 * (1.0 - mu);
+                    float edgeAA = smoothstep(1.0, 0.94, sunRho);
+                    float baseRad = discRadiance(state.sunIlluminance, sunRadius);
+                    directSun += float3(baseRad * limb * edgeAA);
+                }
+
+                // 2. High-energy forward solar corona
+                float corona = 0.06 / (pow(max(sunRho - 0.88, 0.03), 1.5) + 0.04);
+                corona *= smoothstep(16.0, 1.0, sunRho);
+                directSun += float3(state.sunIlluminance * 0.06 * corona);
+
+                // 3. 8-blade aperture diffraction starburst spikes
+                float3 sRight, sUp;
+                celestialSquareFrame(state.sunDir, sRight, sUp);
+                float2 sLocal = float2(dot(dir, sRight), dot(dir, sUp)) / tan(sunRadius);
+                float sTheta = atan2(sLocal.y, sLocal.x);
+                float starburst = (pow(abs(cos(sTheta * 4.0)), 16.0) * 0.12 + pow(abs(sin(sTheta * 4.0)), 16.0) * 0.06);
+                starburst *= smoothstep(10.0, 1.0, sunRho) * smoothstep(0.4, 1.2, sunRho);
+                directSun += float3(state.sunIlluminance * starburst * 0.06);
+
+                color += directSun * sunExtinction * sunCloudT;
             }
-            if (celestialSquareLocal(dir, state.moonDir, state.moonDiscHalfAngle, local)) {
-                float2 uv = lerp(state.moonUv.xy, state.moonUv.zw, local * 0.5 + 0.5);
-                float3 texel = srgbToLinear(celestialsAtlas.SampleLevel(uv, 0.0).rgb);
-                float3 moonExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
-                        state.moonDir, state.moonAngularRadius);
-                // The phase sprite already carries the lit shape; a contrast ramp suppresses its faint
-                // painted halo while keeping that shape.
-                float shape = smoothstep(0.0, 1.0, min(length(texel), 1.0));
-                float cloudT = celestialCloudTransmittance(state, state.moonDir, state.moonDiscHalfAngle);
-                color += discRadiance(state.moonIlluminance, state.moonDiscHalfAngle)
-                       * moonExtinction * texel * shape * cloudT;
+
+            // ---- Optical Lens Flare Ring and Wide Atmospheric Halo
+            if (sunCos > 0.60 && sunCloudT > 1.0e-4) {
+                float sunDist = acos(clamp(sunCos, -1.0, 1.0));
+                // Primary optical 22-degree atmospheric halo ring
+                float ring = exp(-pow((sunDist - 0.38) * 14.0, 2.0)) * 0.022;
+                // Secondary 46-degree chromatic flare ring
+                float ring2 = exp(-pow((sunDist - 0.72) * 18.0, 2.0)) * 0.008;
+                float3 flareTint = float3(ring * 1.0 + ring2 * 0.6, ring * 0.92 + ring2 * 0.75, ring * 0.75 + ring2 * 0.95);
+                // Broad camera lens glow
+                float wideGlow = 0.006 / (sunDist * sunDist + 0.06);
+                color += (flareTint + float3(wideGlow)) * state.sunIlluminance * 0.0025 * sunExtinction * sunCloudT;
             }
-            // No separate horizon gate on either body. A set sun or moon goes dark because its extinction
-            // is zero below the horizon, matching the NEE visibility test.
+
+            // ---- Realistic 3D Spherical Moon with Physical Phase Terminator & Craters
+            float moonCos = dot(dir, state.moonDir);
+            float moonCloudT = celestialCloudTransmittance(state, state.moonDir, 0.016);
+            if (moonCos > 0.0 && moonCloudT > 1.0e-4) {
+                float moonAngle = acos(clamp(moonCos, -1.0, 1.0));
+                float moonRadius = 0.018; // Angular radius (~1.03 deg)
+                float moonRho = moonAngle / moonRadius;
+
+                if (moonRho <= 1.0) {
+                    float3 mRight, mUp;
+                    celestialSquareFrame(state.moonDir, mRight, mUp);
+                    float3 planar = dir / max(moonCos, 1.0e-3);
+                    float2 mLocal = float2(dot(planar, mRight), dot(planar, mUp)) / tan(moonRadius);
+
+                    float r2 = dot(mLocal, mLocal);
+                    if (r2 <= 1.0) {
+                        float nz = sqrt(max(0.0, 1.0 - r2));
+                        float3 moonNormal = normalize(mRight * mLocal.x + mUp * mLocal.y + state.moonDir * nz);
+
+                        // 3D Physical phase terminator illuminated by the Sun
+                        float NdotL = dot(moonNormal, state.sunDir);
+                        float phaseTerminator = smoothstep(-0.05, 0.15, NdotL);
+
+                        // Procedural lunar maria & crater textures
+                        float craters = hash13(float3(floor(mLocal * 28.0), 19.0)) * 0.18 + 0.82;
+                        float maria = smoothstep(0.25, 0.75, hash13(float3(floor(mLocal * 7.0), 43.0))) * 0.28;
+                        float albedo = saturate(craters - maria);
+
+                        // Subtle Earthshine on the dark side of the moon
+                        float earthshine = 0.015 * (1.0 - phaseTerminator);
+
+                        float limbAA = smoothstep(1.0, 0.94, moonRho);
+                        float moonRad = discRadiance(state.moonIlluminance, moonRadius);
+                        float3 moonColor = float3(moonRad * (phaseTerminator * albedo + earthshine) * limbAA);
+
+                        float3 moonExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
+                                state.moonDir, state.moonAngularRadius);
+                        color += moonColor * moonExtinction * moonCloudT;
+                    }
+                }
+            }
         }
     } else {
         // No atmosphere outside the overworld: the probe's per-dimension sky colour, scaled to radiance

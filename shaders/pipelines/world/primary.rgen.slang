@@ -120,6 +120,18 @@ public PathSegment tracePrimary(PathSegment seg,
         if (any(medium.current.extinction > 0.0)) {
             throughput *= exp(-medium.current.extinction * payload.hitT);
         }
+        if (worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+            SkyState sky = skyState(worldPush);
+            if (sky.cloudCoverage > 0.0) {
+                float tEnter, tExit, segLen;
+                float cloudT = cloudSegmentTransmittance(ro, rd, payload.hitT,
+                        worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                        sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+                if (cloudT < 0.999) {
+                    throughput *= float3(cloudT);
+                }
+            }
+        }
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0),
                            RAY_CONE_MIN_WIDTH);
 

@@ -45,6 +45,9 @@ public static const float CIRRUS_DENSITY = 0.005;
 // Normalized wind direction (world XZ), precomputed so it can be a static constant.
 public static const float2 CLOUD_WIND_DIR = float2(0.94386, 0.33035);
 
+// Maximum ray distance traversed inside the volumetric cloud layer.
+public static const float CLOUD_MAX_RAY_DIST = 4000.0;
+
 // Spherical atmospheric layer intersection accounting for Earth curvature and camera altitude
 public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, float topAlt, out float tEnter, out float tExit) {
     float planetRad = ATMOS_BOTTOM_KM * 1000.0;
@@ -72,37 +75,37 @@ public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, floa
     float tBotFar  = dBot >= 0.0 ? -bBot + sqrt(dBot) : -1.0;
 
     if (origin.y < bottomAlt) {
+        // Viewer is strictly below the cloud layer
         if (dBot >= 0.0 && tBotFar > 0.0) {
             tEnter = max(tBotFar, 0.0);
-            tExit = min(tTopFar, tEnter + 4000.0);
+            tExit = min(tTopFar, tEnter + CLOUD_MAX_RAY_DIST);
         } else if (tTopFar > 0.0 && dir.y > 0.0) {
             tEnter = max(tTopNear, 0.0);
-            tExit = min(tTopFar, tEnter + 4000.0);
+            tExit = min(tTopFar, tEnter + CLOUD_MAX_RAY_DIST);
         } else {
             tEnter = 0.0;
             tExit = 0.0;
             return false;
         }
-        return tExit > tEnter;
     } else if (origin.y > topAlt) {
+        // Viewer is strictly above the cloud layer
         if (tTopNear > 0.0) {
             tEnter = max(tTopNear, 0.0);
-            tExit = min(tBotNear > 0.0 ? tBotNear : tTopFar, tEnter + 4000.0);
-            return tExit > tEnter;
-        }
-        tEnter = 0.0;
-        tExit = 0.0;
-        return false;
-    } else {
-        // Camera is INSIDE the cloud layer!
-        tEnter = 0.0;
-        if (dir.y >= 0.0) {
-            tExit = min(tTopFar, 3500.0);
+            float naturalExit = (dBot >= 0.0 && tBotNear > 0.0) ? tBotNear : tTopFar;
+            tExit = min(naturalExit, tEnter + CLOUD_MAX_RAY_DIST);
         } else {
-            tExit = min(tBotNear > 0.0 ? tBotNear : tTopFar, 3500.0);
+            tEnter = 0.0;
+            tExit = 0.0;
+            return false;
         }
-        return tExit > tEnter;
+    } else {
+        // Viewer is INSIDE the cloud layer (bottomAlt <= origin.y <= topAlt)
+        tEnter = 0.0;
+        float naturalExit = (dBot >= 0.0 && tBotNear > 0.0) ? tBotNear : tTopFar;
+        tExit = min(naturalExit, tEnter + CLOUD_MAX_RAY_DIST);
     }
+
+    return tExit > tEnter;
 }
 
 // Sample the baked shape (R) and erosion (G) volumes; the samplers REPEAT, so these need no fract().
@@ -261,20 +264,69 @@ public float cloudTransmittanceToward(float3 origin, float3 dir, float2 anchor, 
 }
 
 /**
- * Equirectangular dome coordinates shared by the bake (which writes texel centres) and every sampler of
- * the dome (world.rmiss, primary). U wraps about +X north-east-south-west, V runs zenith to nadir.
+ * Evaluates cloud transmittance along a finite segment [origin, origin + dir * maxT].
+ * Returns 1.0 if the segment does not intersect the cloud layer or if coverage is zero.
+ */
+public float cloudSegmentTransmittance(float3 origin, float3 dir, float maxT, float2 anchor, float cloudAlt,
+                                float coverage, float time, Sampler3D shapeNoise, Sampler3D curlNoise,
+                                out float tEnter, out float tExit, out float segLen) {
+    tEnter = 0.0;
+    tExit = 0.0;
+    segLen = 0.0;
+    if (coverage <= 0.0 || maxT <= 0.0) {
+        return 1.0;
+    }
+    if (!intersectCloudLayer(origin, dir, cloudAlt, cloudAlt + CLOUD_THICKNESS_BLOCKS, tEnter, tExit)) {
+        return 1.0;
+    }
+    float segEnter = max(tEnter, 0.0);
+    float segExit = min(tExit, maxT);
+    if (segExit <= segEnter) {
+        return 1.0;
+    }
+    segLen = segExit - segEnter;
+    float3 p0 = origin + dir * (segEnter + segLen * 0.25);
+    float3 p1 = origin + dir * (segEnter + segLen * 0.75);
+    float d0 = cloudDensityAt(p0, anchor, cloudAlt, coverage, time, shapeNoise, curlNoise);
+    float d1 = cloudDensityAt(p1, anchor, cloudAlt, coverage, time, shapeNoise, curlNoise);
+    float dAvg = 0.5 * (d0 + d1);
+    return exp(-dAvg * CLOUD_DENSITY * segLen);
+}
+
+/**
+ * Continuous Orthographic Hemispherical Projection:
+ * Left square (uv.x in [0, 0.5]): Upper sky dome (dy >= 0).
+ * Right square (uv.x in [0.5, 1.0]): Lower ground hemisphere (dy < 0).
+ * Zenith (0, 1, 0) maps to the exact continuous center (0.25, 0.50).
+ * The mapping uv = dir.xz * 0.49 + 0.5 is strictly linear and isotropic everywhere around zenith.
+ * Completely eliminates all pyramid creases, polar vortices, and seam lines.
  */
 public float2 cloudDomeUv(float3 dir) {
-    float u = atan2(dir.z, dir.x) * (0.5 / SKY_PI) + 0.5;
-    float v = acos(clamp(dir.y, -1.0, 1.0)) / SKY_PI;
-    return float2(u, v);
+    if (dir.y >= 0.0) {
+        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
+        return float2(local.x * 0.5, local.y);
+    } else {
+        float2 local = clamp(dir.xz * 0.49 + 0.5, 0.005, 0.995);
+        return float2(0.5 + local.x * 0.5, local.y);
+    }
 }
 
 public float3 cloudDomeDir(float2 uv) {
-    float azimuth = (uv.x - 0.5) * 2.0 * SKY_PI;
-    float zenith = uv.y * SKY_PI;
-    float sinZenith = sin(zenith);
-    return float3(cos(azimuth) * sinZenith, cos(zenith), sin(azimuth) * sinZenith);
+    if (uv.x < 0.5) {
+        float2 local = float2(uv.x * 2.0, uv.y);
+        float2 p = (local - 0.5) / 0.49;
+        float r2 = dot(p, p);
+        float dy = sqrt(max(0.0, 1.0 - min(r2, 1.0)));
+        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
+        return float3(p.x * s, dy, p.y * s);
+    } else {
+        float2 local = float2((uv.x - 0.5) * 2.0, uv.y);
+        float2 p = (local - 0.5) / 0.49;
+        float r2 = dot(p, p);
+        float dy = -sqrt(max(0.0, 1.0 - min(r2, 1.0)));
+        float s = r2 > 1.0 ? 1.0 / sqrt(r2) : 1.0;
+        return float3(p.x * s, dy, p.y * s);
+    }
 }
 
 // Production dual-lobe cloud phase: forward HG lobe, backscatter lobe, and anti-solar silver lining boost.

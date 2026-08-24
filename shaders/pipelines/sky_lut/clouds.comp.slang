@@ -16,9 +16,9 @@ import bindings;
 [[vk::push_constant]] PushAddr pcAddr;
 
 // Mirrored in RtSkyLut.java; the two must agree exactly.
-public static const int CLOUD_DOME_W = 1024;
-public static const int CLOUD_DOME_H = 512;
-public static const int CLOUD_MARCH_STEPS = 32;
+public static const int CLOUD_DOME_W = 1280;
+public static const int CLOUD_DOME_H = 640;
+public static const int CLOUD_MARCH_STEPS = 48;
 
 float cloudLightOD(float3 pos, float3 lightDir, float2 anchor, float cloudAlt, float coverage, float time,
                    Sampler3D shapeNoise, Sampler3D curlNoise) {
@@ -105,11 +105,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float tEnter0, tExit0;
     if (intersectCloudLayer(origin, dir, alt, alt + CLOUD_THICKNESS_BLOCKS, tEnter0, tExit0)) {
         float dt = (tExit0 - tEnter0) / float(CLOUD_MARCH_STEPS);
+        // Stratified jitter to break discrete concentric spherical slicing bands
+        float jitter = frac(sin(dot(float2(tid.xy), float2(12.9898, 78.233))) * 43758.5453);
         for (int i = 0; i < CLOUD_MARCH_STEPS; i++) {
             if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.01) {
                 break;
             }
-            float t = tEnter0 + (float(i) + 0.5) * dt;
+            float t = tEnter0 + (float(i) + jitter) * dt;
             float3 p = origin + dir * t;
             float density = cloudDensityAt(p, anchor, alt, coverage, sky.cloudTime,
                     cloudShapeNoise, cloudCurlNoise);
@@ -148,26 +150,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float distFade = smoothstep(7000.0, 2500.0, tEnter0);
         transmittance = lerp(float3(1.0), transmittance, distFade);
         inscatter *= distFade;
-    }
-
-    // ---- Layer 1: High Cloud Family (Cirrus, Cirrocumulus, Cirrostratus)
-    float cirrusAlt = alt + CIRRUS_ALT_OFFSET + CIRRUS_THICKNESS * 0.5;
-    if (dir.y > 0.015 && origin.y < cirrusAlt && max(transmittance.r, max(transmittance.g, transmittance.b)) > 0.05) {
-        float tCirrus = (cirrusAlt - origin.y) / dir.y;
-        if (tCirrus < 30000.0) {
-            float3 pCirrus = origin + dir * tCirrus;
-            float density = highCloudDensityAt(pCirrus, anchor, alt, coverage, sky.cloudTime,
-                    cloudShapeNoise, cloudCurlNoise);
-            if (density > 0.0) {
-                // High sunlight transmittance: delicate ice crystals (transmittance 85% ~ 95%)
-                float opticalDepth = density * 0.30;
-                float cirrusT = exp(-opticalDepth);
-                float3 cirrusLit = lightColor * (cloudPhase(dot(dir, lightDir)) * 0.85 + 0.15) + ambientSky * 0.65;
-                float3 stepScatter = cirrusLit * (1.0 - cirrusT);
-                inscatter += transmittance * stepScatter;
-                transmittance *= cirrusT;
-            }
-        }
     }
 
     cloudDomeImage[tid.xy] = float4(max(inscatter, float3(0.0)), max(transmittance.x, 0.0));

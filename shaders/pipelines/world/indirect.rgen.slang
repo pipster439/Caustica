@@ -30,6 +30,7 @@ import trace_ser;
 #endif
 import lighting;
 import sky;
+import clouds;
 import bindings;
 
 // Atmospheric transmittance LUT (RtSkyLut), also bound to world.rmiss at the same binding: raygen reads it
@@ -129,6 +130,26 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
                 L += throughput * bt709ToAcesCg(worldPush.skyLook6.xyz) * fogLum
                         * (float3(1.0) - fogT);
                 throughput *= fogT;
+            }
+
+            // Volumetric clouds along this air segment (Overworld only):
+            // If the ray from ro to hitPos intersects the cloud layer, attenuate throughput and add inscatter.
+            if (bounce == 0 && worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+                SkyState sky = skyState(worldPush);
+                if (sky.cloudCoverage > 0.0) {
+                    float tEnter, tExit, segLen;
+                    float cloudT = cloudSegmentTransmittance(ro, rd, payload.hitT,
+                            worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                            sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+                    if (cloudT < 0.999) {
+                        float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(rd), 0.0);
+                        float domeCover = max(1.0 - cloudDome.a, 1.0e-4);
+                        float segCover = 1.0 - cloudT;
+                        float3 cloudInscatter = cloudDome.rgb * (segCover / domeCover);
+                        L += throughput * cloudInscatter;
+                        throughput *= float3(cloudT);
+                    }
+                }
             }
         }
 
@@ -450,13 +471,39 @@ void main() {
         }
         recordIndex = packed.nextRecord;
     }
+
+    // If the primary camera ray hit a dielectric (water/glass) in Pass A, add the camera-to-water cloud in-scatter
+    PackedPathSegment firstPacked = queue[pixelIndex];
+    PathSegment firstSeg = unpackPathSegment(firstPacked);
+    if (firstSeg.bounce > 0 && worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+        SkyState sky = skyState(worldPush);
+        if (sky.cloudCoverage > 0.0) {
+            float2 size = float2(dimensions);
+            float2 uv = (float2(pix) + 0.5) / size;
+            float2 jndc = (uv + worldPush.jitter / size) * 2.0 - 1.0;
+            float4 nearH = mul(worldPush.invViewProj, float4(jndc.x, jndc.y, 1.0, 1.0));
+            float4 farH = mul(worldPush.invViewProj, float4(jndc.x, jndc.y, 0.0, 1.0));
+            float3 nearP = nearH.xyz / nearH.w;
+            float3 farP = farH.xyz / farH.w;
+            float3 camOrigin = nearP + worldPush.camOffset.xyz;
+            float3 primaryDir = normalize(farP - nearP);
+            float waterDist = distance(firstSeg.ro, camOrigin);
+            float tEnter, tExit, segLen;
+            float cloudT = cloudSegmentTransmittance(camOrigin, primaryDir, waterDist,
+                    worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                    sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+            if (cloudT < 0.999) {
+                float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(primaryDir), 0.0);
+                float domeCover = max(1.0 - cloudDome.a, 1.0e-4);
+                float segCover = 1.0 - cloudT;
+                float3 cloudInscatter = cloudDome.rgb * (segCover / domeCover);
+                frameRadiance += cloudInscatter * float(spp);
+            }
+        }
+    }
+
     // Pre-exposure is applied here and nowhere else: the entire path-traced result above is in absolute
     // scene units, and only the fp16 store is normalized.
-    //
-    // outImage is rgba16f, so anything over 65504 would round to +inf and propagate as NaN
-    // through the denoiser. Pre-exposed, it only bites when a pixel would render >65504x mid-grey — the
-    // sun mid-transition, a firefly off a tiny emitter — and ACES 2.0 renders anything a few EV over
-    // white as white, so it costs nothing visible.
     float3 stored = frameRadiance * (worldPush.preExposure / float(spp));
     outImage[pix] = float4(clamp(stored, float3(0.0), float3(HALF_MAX)), 1.0);
 }

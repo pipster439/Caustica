@@ -141,6 +141,12 @@ float3 tonemapHdr(float3 lookedAcesCg) {
     return displayGammaHdr(hdrToneLut.SampleLevel(lutTexCoord(uvw, pc.lutSize), 0.0).rgb);
 }
 
+// Jimenez's Interleaved Gradient Noise for artifact-free high-frequency display dithering
+float interleavedGradientNoise(float2 pix) {
+    float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+    return frac(magic.z * frac(dot(pix, magic.xy)));
+}
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchId : SV_DispatchThreadID) {
@@ -156,9 +162,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     float3 exposedAcesCg = max(rt.rgb * exposure, float3(0.0));
     exposedAcesCg += sampleBloom(pix, w, h) * max(pc.bloomStrength, 0.0);
     float3 lookedAcesCg = applyLook(exposedAcesCg);
-    outputImage[pix] = float4(tonemap(lookedAcesCg), 1.0);
+
+    // Triangular PDF dithering to eliminate 8-bit SDR and 10-bit HDR quantization banding
+    float ign = interleavedGradientNoise(float2(pix));
+    float ditherSdr = (ign - 0.5) / 255.0;
+    outputImage[pix] = float4(clamp(tonemap(lookedAcesCg) + ditherSdr, 0.0, 1.0), 1.0);
 
     if (pc.hdrEnabled != 0) {
-        hdrImage[pix] = float4(tonemapHdr(lookedAcesCg), 1.0);
+        float ditherHdr = (ign - 0.5) / 1023.0;
+        hdrImage[pix] = float4(clamp(tonemapHdr(lookedAcesCg) + ditherHdr, 0.0, 1.0), 1.0);
     }
 }
