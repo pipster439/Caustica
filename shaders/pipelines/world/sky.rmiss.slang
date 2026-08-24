@@ -146,10 +146,15 @@ void main(inout Payload payload) {
 
         float alt = state.cloudAltRebased;
 
-        // 4K Ray-rate edge re-contouring & high-frequency micro-erosion
+        // Ray-rate edge re-contouring is only used for side/top silhouettes.  When the camera is below the
+        // cumulus layer, the entry point for every upward ray lies on the flat cloud base; perturbing the
+        // baked transmittance with a fresh 3D-noise sample at that entry plane creates a view-centred dark
+        // cone that follows the player instead of a stable cloud feature.
         float tEnter, tExit;
-        float edgeWeight = smoothstep(0.01, 0.15, baseT) * smoothstep(0.99, 0.85, baseT);
-        if (edgeWeight > 0.0 && intersectCloudLayer(worldPush.camOffset.xyz, dir, alt, alt + CLOUD_THICKNESS_BLOCKS, tEnter, tExit)) {
+        bool undersideView = worldPush.camOffset.y < alt && dir.y > 0.0;
+        float edgeWeight = smoothstep(0.01, 0.15, baseT) * (1.0 - smoothstep(0.85, 0.99, baseT));
+        if (!undersideView && edgeWeight > 0.0
+                && intersectCloudLayer(worldPush.camOffset.xyz, dir, alt, alt + CLOUD_THICKNESS_BLOCKS, tEnter, tExit)) {
             float3 pEnter = worldPush.camOffset.xyz + dir * tEnter + float3(worldPush.waterAnchor.x, 0.0, worldPush.waterAnchor.y);
             float erosion = cloudErosionNoise3D(cloudShapeNoise, pEnter * 0.0035);
             baseT = saturate(baseT + (erosion - 0.5) * 0.25 * edgeWeight);
