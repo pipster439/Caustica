@@ -16,10 +16,11 @@ import bindings;
 [[vk::push_constant]] PushAddr pcAddr;
 
 // Mirrored in RtSkyLut.java; the two must agree exactly.
-// Each orthographic hemisphere must have an odd square extent. With an even 640x640 extent the zenith
+// Each projected hemisphere must have an odd square extent. With an even 640x640 extent the zenith
 // lies at the junction of four independently jittered texels; bilinear reconstruction turns their
 // differing cloud optical depths into a camera-centred four-way saddle on the cloud underside.
-public static const int CLOUD_DOME_W = 1282;
+public static const int CLOUD_DOME_HEMISPHERE_W = 641;
+public static const int CLOUD_DOME_W = CLOUD_DOME_HEMISPHERE_W * 2;
 public static const int CLOUD_DOME_H = 641;
 public static const int CLOUD_MARCH_STEPS = 48;
 
@@ -108,8 +109,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float tEnter0, tExit0;
     if (intersectCloudLayer(origin, dir, alt, alt + CLOUD_THICKNESS_BLOCKS, tEnter0, tExit0)) {
         float dt = (tExit0 - tEnter0) / float(CLOUD_MARCH_STEPS);
-        // Stratified jitter to break discrete concentric spherical slicing bands
-        float jitter = frac(sin(dot(float2(tid.xy), float2(12.9898, 78.233))) * 43758.5453);
+
+        // Use the same jitter coordinate in both hemisphere tiles so their common horizon agrees.
+        // A full random step offset is especially unstable on grazing rays: dt can approach 83 blocks,
+        // turning each angular texel into a different opaque/clear vertical bar. Fade to midpoint
+        // sampling over the last few horizon texels while retaining stratification elsewhere.
+        uint localX = tid.x < uint(CLOUD_DOME_HEMISPHERE_W)
+                ? tid.x : tid.x - uint(CLOUD_DOME_HEMISPHERE_W);
+        float randomJitter = frac(sin(dot(float2(float(localX), float(tid.y)),
+                float2(12.9898, 78.233))) * 43758.5453);
+        float jitterWeight = smoothstep(0.02, 0.12, abs(dir.y));
+        float jitter = lerp(0.5, randomJitter, jitterWeight);
         for (int i = 0; i < CLOUD_MARCH_STEPS; i++) {
             if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.01) {
                 break;
