@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "default",
-  "packageVersion": 4,
+  "packageVersion": 5,
   "exposure": {
     "minEv": -15.0,
     "maxEv": -2.0,
@@ -23,7 +23,10 @@
     "blockEmissionLuminanceCdM2": 2000.0,
     "nightAirglowLuminanceCdM2": 0.002,
     "starLuminanceCdM2": 10.0,
-    "moonPhaseFixedFraction": 0.1
+    "moonPhaseFixedFraction": 0.1,
+    "netherSkyLuminanceCdM2": 14.0,
+    "endSkyLuminanceCdM2": 1.5,
+    "weatherSkyGreyCdM2": 900.0
   },
   "sky": {
     "sunNoonSouthTiltDegrees": 30.0,
@@ -32,6 +35,7 @@
     "sunDiscHalfAngleDegrees": 16.7,
     "moonDiscHalfAngleDegrees": 11.31,
     "groundAlbedo": 0.1,
-    "horizonSoftenDegrees": 15.0
+    "horizonSoftenDegrees": 15.0,
+    "cloudCoverageBase": 0.42
   }
 }

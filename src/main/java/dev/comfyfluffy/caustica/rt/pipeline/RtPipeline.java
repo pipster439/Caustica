@@ -168,6 +168,20 @@ public final class RtPipeline {
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1)
                     .stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            // Volumetric cloud dome: sampled by world.rmiss (dome + disc occlusion) and primary.rgen
+            // (sky-guide cloud motion), hence MISS | RAYGEN.
+            binds.get(WORLD_CLOUDS).binding(WORLD_CLOUDS)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1)
+                    .stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            // Static cloud noise volumes, sampled by the density field from the miss shader (edge
+            // recontour) and raygen (shadow-path transmittance).
+            for (int binding = WORLD_CLOUD_SHAPE; binding <= WORLD_CLOUD_CURL; binding++) {
+                binds.get(binding).binding(binding)
+                        .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1)
+                        .stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
@@ -450,6 +464,17 @@ public final class RtPipeline {
     public void setSkyLuts(long skyViewImageView, long transmittanceImageView, long sampler) {
         writeAtlasBinding(WORLD_SKY_VIEW, skyViewImageView, sampler);
         writeAtlasBinding(WORLD_TRANSMITTANCE, transmittanceImageView, sampler);
+    }
+
+    /** Bind the volumetric cloud dome (see {@link RtSkyLut}) with its own wrap-U sampler. */
+    public void setCloudDome(long imageView, long sampler) {
+        writeAtlasBinding(WORLD_CLOUDS, imageView, sampler);
+    }
+
+    /** Bind the static cloud noise volumes (see {@link RtSkyLut}); both share the repeat sampler. */
+    public void setCloudNoise(long shapeView, long curlView, long sampler) {
+        writeAtlasBinding(WORLD_CLOUD_SHAPE, shapeView, sampler);
+        writeAtlasBinding(WORLD_CLOUD_CURL, curlView, sampler);
     }
 
     private void writeAtlasBinding(int binding, long imageView, long sampler) {

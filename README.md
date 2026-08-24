@@ -81,6 +81,7 @@ license terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 ## TODO List
 
 - [ ] Nether/End sky, weather, volumetric fog/clouds
-- [ ] NRD + FSR for non-NVIDIA GPUs
+  - [x] Volumetric clouds & weather effects
+  - [ ] Nether & End sky / fog
 - [ ] LOD
 - [ ] ReSTIR

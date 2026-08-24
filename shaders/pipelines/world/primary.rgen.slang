@@ -22,6 +22,8 @@ import segment;
 import water;
 import trace;
 import guides;
+import sky;
+import clouds;
 
 public PathSegment tracePrimary(PathSegment seg,
                                 DevicePtr<PackedPathSegment> queue,
@@ -56,6 +58,23 @@ public PathSegment tracePrimary(PathSegment seg,
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = float3(0.0, 0.0, 0.0);
                 gv_spec = makeSpecSurface(gv_hitCamRel, gv_normal, 1.0, SKY_SPEC_ALBEDO);
+                // Clouds: when the dome says this pixel holds cloud, anchor the sky guide point ON the
+                // layer and give it the wind's per-frame displacement, so DLSS-RR reprojects the drift
+                // instead of treating the sky as static and smearing it. The guide point also carries
+                // camera parallax correctly because it sits at the layer's real depth.
+                SkyState sky = skyState(worldPush);
+                if (sky.dimension == DIMENSION_OVERWORLD && sky.cloudCoverage > 0.0 && rd.y > 0.05) {
+                    float cloudA = cloudDomeLut.SampleLevel(cloudDomeUv(rd), 0.0).a;
+                    float cloudPresent = 1.0 - cloudA;
+                    if (cloudPresent > 0.001) {
+                        float layerDist = max((sky.cloudAltRebased - worldPush.camOffset.y) / rd.y, 1.0);
+                        gv_hitCamRel = rd * layerDist;
+                        gv_motionObjDisp = float3(CLOUD_WIND_DIR.x, 0.0, CLOUD_WIND_DIR.y)
+                                * (CLOUD_WIND_SPEED * sky.cloudDt);
+                        gv_albedo = lerp(SKY_DIFF_ALBEDO, float3(0.85, 0.85, 0.85),
+                                float3(cloudPresent, cloudPresent, cloudPresent));
+                    }
+                }
             }
             return terminal;
         }
@@ -100,6 +119,18 @@ public PathSegment tracePrimary(PathSegment seg,
         // the record for the next trace. The terminal hit above is deliberately not consumed here.
         if (any(medium.current.extinction > 0.0)) {
             throughput *= exp(-medium.current.extinction * payload.hitT);
+        }
+        if (worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+            SkyState sky = skyState(worldPush);
+            if (sky.cloudCoverage > 0.0) {
+                float tEnter, tExit, segLen;
+                float cloudT = cloudSegmentTransmittance(ro, rd, payload.hitT,
+                        worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                        sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+                if (cloudT < 0.999) {
+                    throughput *= float3(cloudT);
+                }
+            }
         }
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0),
                            RAY_CONE_MIN_WIDTH);

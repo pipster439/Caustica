@@ -30,6 +30,7 @@ import trace_ser;
 #endif
 import lighting;
 import sky;
+import clouds;
 import bindings;
 
 // Atmospheric transmittance LUT (RtSkyLut), also bound to world.rmiss at the same binding: raygen reads it
@@ -111,6 +112,45 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         // the ordinary case costs one comparison.
         if (any(medium.current.extinction > 0.0)) {
             throughput *= exp(-medium.current.extinction * payload.hitT);
+        } else {
+            // Uniform air fog: the dimension's haze (nether/end) or rain haze (overworld). Optical depth
+            // runs linearly from the pushed fog start to end distance (e^-3 at the end), and the airlight
+            // converges to the fog colour — which outside the overworld IS the pushed sky colour, so
+            // distant terrain melts into the sky with no seam. In the overworld only rain produces fog,
+            // and its in-scatter luminance is the overcast grey scaled by the rain level, matching the
+            // grey the miss shader adds to the sky.
+            float fogRange = worldPush.skyLook7.x - worldPush.skyLook6.w;
+            if (fogRange > 0.0) {
+                float fogOptical = 3.0 * clamp(payload.hitT - worldPush.skyLook6.w, 0.0, fogRange)
+                        / fogRange;
+                float3 fogT = exp(-float3(fogOptical));
+                float fogLum = worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)
+                        ? worldPush.skyLook7.w * worldPush.skyLook3.z
+                        : worldPush.skyLook5.w;
+                L += throughput * bt709ToAcesCg(worldPush.skyLook6.xyz) * fogLum
+                        * (float3(1.0) - fogT);
+                throughput *= fogT;
+            }
+
+            // Volumetric clouds along this air segment (Overworld only):
+            // If the ray from ro to hitPos intersects the cloud layer, attenuate throughput and add inscatter.
+            if (bounce == 0 && worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+                SkyState sky = skyState(worldPush);
+                if (sky.cloudCoverage > 0.0) {
+                    float tEnter, tExit, segLen;
+                    float cloudT = cloudSegmentTransmittance(ro, rd, payload.hitT,
+                            worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                            sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+                    if (cloudT < 0.999) {
+                        float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(rd), 0.0);
+                        float domeCover = max(1.0 - cloudDome.a, 1.0e-4);
+                        float segCover = 1.0 - cloudT;
+                        float3 cloudInscatter = cloudDome.rgb * (segCover / domeCover);
+                        L += throughput * cloudInscatter;
+                        throughput *= float3(cloudT);
+                    }
+                }
+            }
         }
 
         float3 n = payloadNormal(); // oriented toward the incoming ray by the closest-hit
@@ -209,9 +249,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             // camera side.
             float signedNdl = dot(n, lightDir);
             float ndl = abs(signedNdl);
-            if (ndl > 0.0) {
+            if (ndl > 0.0 && luminance(celestialLight.illuminance) > 0.0) {
                 float3 shadowOrigin = hitPos + (signedNdl >= 0.0 ? n : -n) * SURF_BIAS;
                 float3 vis = visibility(shadowOrigin, lightDir, 10000.0).transmittance;
+                vis *= celestialCloudShadow(shadowOrigin, lightDir);
                 if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
                     L += throughput * albedo * INV_PI * celestialLight.illuminance * ndl * vis;
                 }
@@ -285,9 +326,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
         }
         float ndl = max(0.0, dot(n, lightDir));
-        if (ndl > 0.0) {
+        if (ndl > 0.0 && luminance(celestialLight.illuminance) > 0.0) {
             VisibilityResult shadow = visibility(p, lightDir, 10000.0);
             float3 vis = shadow.transmittance;
+            // A shadow ray that reached the sky crossed the cloud layer on the way: fold its
+            // transmittance in so clouds shadow the sun/moon light and paint their moving shadows on
+            // terrain (analytic layer crossing, the same field the dome bake marches).
+            vis *= celestialCloudShadow(p, lightDir);
             // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
             // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,
             // so it applies to the whole NEE term (diffuse + specular).
@@ -326,11 +371,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         // through them toward the light source). Shadow ray fires from the back face to avoid
         // self-occlusion. cosT = dot(lightDir, rd): rd tracks the ray toward the sun when the sun is
         // behind the slab, giving cosT ≈ 1 → forward-scatter peak.
-        if (sss > 0.0 && hitDepth <= MAX_SSS_INDIRECT_DEPTH) {
+        if (sss > 0.0 && hitDepth <= MAX_SSS_INDIRECT_DEPTH
+                && luminance(celestialLight.illuminance) > 0.0) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
                 VisibilityResult shadowBack = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
                 float3 visB = shadowBack.transmittance;
+                visB *= celestialCloudShadow(hitPos - n * SURF_BIAS, lightDir);
                 // Same caustic as the front-face NEE — underwater kelp/seagrass transmission should
                 // flicker with the same light bands as the floor around it.
                 if (medium.current.water && waterWaves && shadowBack.waterHitT > 0.0) {
@@ -424,13 +471,39 @@ void main() {
         }
         recordIndex = packed.nextRecord;
     }
+
+    // If the primary camera ray hit a dielectric (water/glass) in Pass A, add the camera-to-water cloud in-scatter
+    PackedPathSegment firstPacked = queue[pixelIndex];
+    PathSegment firstSeg = unpackPathSegment(firstPacked);
+    if (firstSeg.bounce > 0 && worldPush.skyLook4.x == float(DIMENSION_OVERWORLD)) {
+        SkyState sky = skyState(worldPush);
+        if (sky.cloudCoverage > 0.0) {
+            float2 size = float2(dimensions);
+            float2 uv = (float2(pix) + 0.5) / size;
+            float2 jndc = (uv + worldPush.jitter / size) * 2.0 - 1.0;
+            float4 nearH = mul(worldPush.invViewProj, float4(jndc.x, jndc.y, 1.0, 1.0));
+            float4 farH = mul(worldPush.invViewProj, float4(jndc.x, jndc.y, 0.0, 1.0));
+            float3 nearP = nearH.xyz / nearH.w;
+            float3 farP = farH.xyz / farH.w;
+            float3 camOrigin = nearP + worldPush.camOffset.xyz;
+            float3 primaryDir = normalize(farP - nearP);
+            float waterDist = distance(firstSeg.ro, camOrigin);
+            float tEnter, tExit, segLen;
+            float cloudT = cloudSegmentTransmittance(camOrigin, primaryDir, waterDist,
+                    worldPush.waterAnchor.xy, sky.cloudAltRebased, sky.cloudCoverage,
+                    sky.cloudTime, cloudShapeNoise, cloudCurlNoise, tEnter, tExit, segLen);
+            if (cloudT < 0.999) {
+                float4 cloudDome = cloudDomeLut.SampleLevel(cloudDomeUv(primaryDir), 0.0);
+                float domeCover = max(1.0 - cloudDome.a, 1.0e-4);
+                float segCover = 1.0 - cloudT;
+                float3 cloudInscatter = cloudDome.rgb * (segCover / domeCover);
+                frameRadiance += cloudInscatter * float(spp);
+            }
+        }
+    }
+
     // Pre-exposure is applied here and nowhere else: the entire path-traced result above is in absolute
     // scene units, and only the fp16 store is normalized.
-    //
-    // outImage is rgba16f, so anything over 65504 would round to +inf and propagate as NaN
-    // through the denoiser. Pre-exposed, it only bites when a pixel would render >65504x mid-grey — the
-    // sun mid-transition, a firefly off a tiny emitter — and ACES 2.0 renders anything a few EV over
-    // white as white, so it costs nothing visible.
     float3 stored = frameRadiance * (worldPush.preExposure / float(spp));
     outImage[pix] = float4(clamp(stored, float3(0.0), float3(HALF_MAX)), 1.0);
 }

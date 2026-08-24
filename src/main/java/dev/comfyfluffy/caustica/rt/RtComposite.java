@@ -19,6 +19,7 @@ import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float3;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Int4;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.BiomeColors;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -29,8 +30,10 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.attribute.EnvironmentAttributes;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.MoonPhase;
 import net.minecraft.world.level.material.FluidState;
+import dev.comfyfluffy.caustica.mixin.ClientLevelAccessor;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
@@ -275,6 +278,8 @@ public final class RtComposite {
     private boolean mvHasPrev;
     private float previousWaterWaveTime;
     private boolean waterWaveTimeValid;
+    private float previousCloudTime;
+    private boolean cloudTimeValid;
     private long atlasSampler;
     private boolean failed;
     private boolean loggedActive;
@@ -785,11 +790,14 @@ public final class RtComposite {
         long celView = celestialsAtlasView();
         if (worldPipeline.hasSkyAtlas()) {
             worldPipeline.setSkyAtlas(celView != 0L ? celView : atlasView, sampler);
-            // Atmosphere LUTs live for the device's lifetime, but the world pipeline's descriptor sets do
-            // not (a resource reload rebuilds it), so rebind them alongside the atlas.
+            // Atmosphere LUTs and the cloud dome live for the device's lifetime, but the world pipeline's
+            // descriptor sets do not (a resource reload rebuilds it), so rebind them alongside the atlas.
             if (skyLut != null) {
                 worldPipeline.setSkyLuts(skyLut.skyViewView(), skyLut.transmittanceView(),
                         skyLut.sampler());
+                worldPipeline.setCloudDome(skyLut.cloudDomeView(), skyLut.cloudDomeSampler());
+                worldPipeline.setCloudNoise(skyLut.cloudShapeNoiseView(), skyLut.cloudCurlNoiseView(),
+                        skyLut.cloudNoiseSampler());
             }
         }
         setCelestialUvAtlas(celView);
@@ -1120,7 +1128,7 @@ public final class RtComposite {
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
             // resolved slot rides along with the uploadPending() call right below.
             BreakEntry[] breaking = breakingEntries(terrain);
-            SkyPush sky = skyPush();
+            SkyPush sky = skyPush(terrain.blockY);
             new WorldPushData(
                     frameInvViewProj,
                     new Float3((float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
@@ -1137,6 +1145,10 @@ public final class RtComposite {
                     sky.look1(),
                     sky.look2(),
                     sky.look3(),
+                    sky.look4(),
+                    sky.look5(),
+                    sky.look6(),
+                    sky.look7(),
                     sky.sunUv(),
                     sky.moonUv(),
                     waterParams,
@@ -1197,7 +1209,7 @@ public final class RtComposite {
             // the sky the frame shades are built from one set of angles, not two. Recorded here (after the
             // push flush, before the trace) so the miss shader's very first fetch sees this frame's dome.
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.skyLut")) {
-                skyLut.record(cmd, pushBuf.deviceAddress);
+                skyLut.record(cmd, pushBuf.deviceAddress, sky.look4().x() == 0f);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // sky LUT writes visible to raygen/miss
 
@@ -1335,6 +1347,7 @@ public final class RtComposite {
     }
 
     private record SkyPush(Float4 celestial, Float4 look0, Float4 look1, Float4 look2, Float4 look3,
+                           Float4 look4, Float4 look5, Float4 look6, Float4 look7,
                            Float4 sunUv, Float4 moonUv) {}
 
     private record CelestialUv(Float4 sun, Float4 moon) {}
@@ -1361,11 +1374,12 @@ public final class RtComposite {
      * floor — see {@code sky.MIN_VIEWER_ALTITUDE_KM}, which is set by what fp32 can resolve at planet
      * radius, not by anything visual — so zero here is safe and means "at or below sea level".
      */
-    private SkyPush skyPush() {
+    private SkyPush skyPush(int rebaseBlockY) {
         Minecraft mc = Minecraft.getInstance();
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         var probe = mc.gameRenderer.mainCamera().attributeProbe();
-        int seaLevel = mc.level != null ? mc.level.getSeaLevel() : 0;
+        ClientLevel level = mc.level;
+        int seaLevel = level != null ? level.getSeaLevel() : 0;
         float viewerAltitudeKm = Math.clamp((float) ((camY - seaLevel) / 100.0), 0.0f, 99.0f);
         float toRadians = (float) (Math.PI / 180.0);
         float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * toRadians;
@@ -1377,9 +1391,75 @@ public final class RtComposite {
         float starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
         float moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
 
+        // Dimension id and weather. Only the overworld keeps the physical sky; the other ids select
+        // vanilla's per-dimension colours below and zero the celestial light inside the shader.
+        int dimension = 0;
+        float rain = 0f;
+        float thunder = 0f;
+        float flash = 0f;
+        if (level != null) {
+            if (level.dimension() == Level.NETHER) {
+                dimension = 1;
+            } else if (level.dimension() == Level.END) {
+                dimension = 2;
+            } else if (level.dimension() != Level.OVERWORLD) {
+                dimension = 3;
+            }
+            if (weatherEffects()) {
+                rain = level.getRainLevel(partial);
+                thunder = level.getThunderLevel(partial);
+                // The lightning flash is a short client-side counter set by LightningBolt entities;
+                // vanilla decays it over a few ticks, so /5 normalizes it to 0..1.
+                int flashTicks = ((ClientLevelAccessor) level).caustica$getSkyFlashTime();
+                flash = Math.clamp(flashTicks / 5.0f, 0f, 1f);
+            }
+        }
+
+        // Vanilla's per-dimension sky/fog state from the same probe that owns the celestial angles.
+        int skyColorInt = probe.getValue(EnvironmentAttributes.SKY_COLOR, partial);
+        int fogColorInt = probe.getValue(EnvironmentAttributes.FOG_COLOR, partial);
+        float fogStart = probe.getValue(EnvironmentAttributes.FOG_START_DISTANCE, partial);
+        float fogEnd = probe.getValue(EnvironmentAttributes.FOG_END_DISTANCE, partial);
+        float cloudHeight = probe.getValue(EnvironmentAttributes.CLOUD_HEIGHT, partial);
+
         RtLookPackage.Sky sky = LOOK.sky();
         RtLookPackage.Lighting lighting = LOOK.lighting();
         CelestialUv uv = celestialUv(moonPhase);
+
+        // Cloud coverage: the look package's clear-day base plus rain, zeroed when the toggle is off.
+        float coverage = volumetricClouds()
+                ? Math.min(1f, sky.cloudCoverageBase() + 0.55f * rain) : 0f;
+        // The bake and the shadow rays work in the trace's rebased space, so the layer altitude is
+        // rebased the same way the camera is (see RtTerrain's rebase origin).
+        float cloudAltRebased = cloudHeight - rebaseBlockY;
+
+        // Fog: the overworld gets rain haze whose end distance shrinks toward vanilla's rain fog; other
+        // dimensions keep their probe distances (the nether's ~33-block red fog, the end's). Off → no fog.
+        float fogStartPushed = 0f;
+        float fogEndPushed = 1.0e6f;
+        if (volumetricFog()) {
+            if (dimension == 0) {
+                fogEndPushed = rain > 0f
+                        ? Math.max(1.0e6f - (1.0e6f - 40f) * rain, 8f) : 1.0e6f;
+            } else {
+                fogStartPushed = fogStart;
+                fogEndPushed = fogEnd;
+            }
+        }
+
+        // Radiance anchor for the dimension sky colour: the nether/end have no atmosphere, so their
+        // vanilla colour needs the authored luminance from the look package.
+        float skyLum = dimension == 1 ? lighting.netherSkyLuminanceCdM2()
+                : dimension == 2 ? lighting.endSkyLuminanceCdM2() : 0f;
+
+        // Cloud animation clock, wrapped like the water wave clock. The frame delta drives the sky-guide
+        // motion vector; a first frame or a long pause reports zero drift so RR gets a neutral MV.
+        float cloudTime = (float) (System.nanoTime() / 1.0e9 % 4096.0);
+        float cloudDelta = cloudTime - previousCloudTime;
+        float cloudDt = cloudTimeValid && cloudDelta >= 0f && cloudDelta <= 0.25f ? cloudDelta : 0f;
+        previousCloudTime = cloudTime;
+        cloudTimeValid = true;
+
         return new SkyPush(
                 new Float4(sunAngle, moonAngle, starAngle, starBrightness),
                 new Float4(lighting.sunIlluminanceLux(), lighting.moonIlluminanceLux(),
@@ -1391,9 +1471,33 @@ public final class RtComposite {
                 new Float4(sky.sunDiscHalfAngleDegrees() * toRadians,
                         sky.moonDiscHalfAngleDegrees() * toRadians,
                         viewerAltitudeKm, moonPhase),
-                new Float4(sky.groundAlbedo(), sky.horizonSoftenDegrees() * toRadians, 0f, 0f),
+                new Float4(sky.groundAlbedo(), sky.horizonSoftenDegrees() * toRadians, rain, thunder),
+                new Float4(dimension, coverage, cloudAltRebased, flash),
+                linearBt709FromPacked(skyColorInt, skyLum),
+                linearBt709FromPacked(fogColorInt, fogStartPushed),
+                new Float4(fogEndPushed, cloudDt, cloudTime, lighting.weatherSkyGreyCdM2()),
                 uv.sun(),
                 uv.moon());
+    }
+
+    /** Decode a vanilla 0xRRGGBB colour to linear BT.709 and pack a fourth lane. */
+    private static Float4 linearBt709FromPacked(int rgb, float w) {
+        float r = (float) srgbToLinear(((rgb >> 16) & 0xFF) / 255.0);
+        float g = (float) srgbToLinear(((rgb >> 8) & 0xFF) / 255.0);
+        float b = (float) srgbToLinear((rgb & 0xFF) / 255.0);
+        return new Float4(r, g, b, w);
+    }
+
+    private boolean volumetricClouds() {
+        return CausticaConfig.Rt.Composite.VOLUMETRIC_CLOUDS.value();
+    }
+
+    private boolean weatherEffects() {
+        return CausticaConfig.Rt.Composite.WEATHER_EFFECTS.value();
+    }
+
+    private boolean volumetricFog() {
+        return CausticaConfig.Rt.Composite.VOLUMETRIC_FOG.value();
     }
 
     /**

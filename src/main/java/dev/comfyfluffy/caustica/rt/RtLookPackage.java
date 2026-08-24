@@ -26,7 +26,7 @@ public record RtLookPackage(
         Bloom bloom,
         Lighting lighting,
         Sky sky) {
-    public static final int SCHEMA_VERSION = 4;
+    public static final int SCHEMA_VERSION = 5;
     /** Mirrors RtBloomPipeline.MAX_LEVELS; validated here so a bad package fails at load, not at resize. */
     private static final int MAX_BLOOM_LEVELS = 8;
     public static final String DEFAULT_ID = "default";
@@ -102,7 +102,10 @@ public record RtLookPackage(
                 positive(lightingJson, "blockEmissionLuminanceCdM2", jsonResource),
                 nonNegative(lightingJson, "nightAirglowLuminanceCdM2", jsonResource),
                 nonNegative(lightingJson, "starLuminanceCdM2", jsonResource),
-                nonNegative(lightingJson, "moonPhaseFixedFraction", jsonResource));
+                nonNegative(lightingJson, "moonPhaseFixedFraction", jsonResource),
+                nonNegative(lightingJson, "netherSkyLuminanceCdM2", jsonResource),
+                nonNegative(lightingJson, "endSkyLuminanceCdM2", jsonResource),
+                nonNegative(lightingJson, "weatherSkyGreyCdM2", jsonResource));
         if (lighting.moonPhaseFixedFraction() > 1.0f) {
             throw new IllegalArgumentException(jsonResource
                     + ": lighting.moonPhaseFixedFraction must be in [0,1]");
@@ -116,7 +119,10 @@ public record RtLookPackage(
                 positive(skyJson, "sunDiscHalfAngleDegrees", jsonResource, "sky"),
                 positive(skyJson, "moonDiscHalfAngleDegrees", jsonResource, "sky"),
                 nonNegative(skyJson, "groundAlbedo", jsonResource, "sky"),
-                nonNegative(skyJson, "horizonSoftenDegrees", jsonResource, "sky"));
+                nonNegative(skyJson, "horizonSoftenDegrees", jsonResource, "sky"),
+                requiredFinite(skyJson, "cloudCoverageBase"));
+        requireRange(sky.cloudCoverageBase(), 0.0f, 1.0f,
+                jsonResource, "sky.cloudCoverageBase");
         requireRange(sky.sunNoonSouthTiltDegrees(), -89.0f, 89.0f,
                 jsonResource, "sky.sunNoonSouthTiltDegrees");
         // The NEE radius only jitters the shadow ray, so it sets penumbra softness; the disc half-angle is
@@ -276,6 +282,10 @@ public record RtLookPackage(
      * Photometric anchors. {@code nightAirglowLuminanceCdM2} is airglow plus unresolved starlight—the
      * physical floor of a moonless night, approximately 1e-3 cd/m². Atmospheric multiple scattering is
      * evaluated separately.
+     *
+     * <p>The two dimension anchors scale vanilla's per-dimension sky colour to radiance for the
+     * nether and the end (which have no atmosphere of their own), and {@code weatherSkyGreyCdM2} is the
+     * flat overcast grey rain adds to the overworld sky and its haze.
      */
     public record Lighting(
             float sunIlluminanceLux,
@@ -283,7 +293,10 @@ public record RtLookPackage(
             float blockEmissionLuminanceCdM2,
             float nightAirglowLuminanceCdM2,
             float starLuminanceCdM2,
-            float moonPhaseFixedFraction) {
+            float moonPhaseFixedFraction,
+            float netherSkyLuminanceCdM2,
+            float endSkyLuminanceCdM2,
+            float weatherSkyGreyCdM2) {
         public float moonPhaseFraction() {
             return 1.0f - moonPhaseFixedFraction;
         }
@@ -309,6 +322,8 @@ public record RtLookPackage(
              * and up to ~50 at a low one — and Minecraft never shows the terrain that would justify it, so
              * without this the horizon reads as a hard grey line. Zero restores the hard ground.
              */
-            float horizonSoftenDegrees) {
+            float horizonSoftenDegrees,
+            /** Volumetric cloud coverage on a clear day; rain raises it toward full cover per frame. */
+            float cloudCoverageBase) {
     }
 }

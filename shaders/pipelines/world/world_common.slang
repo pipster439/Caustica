@@ -70,7 +70,21 @@ public struct WorldPush {
     // x drawn sun half-angle (rad), y drawn moon half-angle (rad), z viewer altitude (km),
     // w moon phase index (0 full .. 4 new).
     public float4   skyLook2;
-    public float4   skyLook3;         // x ground albedo, yzw reserved
+    // x ground albedo, y horizon-soften dip (rad), z rain level 0..1, w thunder level 0..1.
+    // Java pushes zero rain/thunder when the weather-effects option is off, so the shader needs no
+    // separate toggle for them.
+    public float4   skyLook3;
+    // x dimension id (0 overworld, 1 nether, 2 end, 3 other), y cloud coverage 0..1, z cloud layer
+    // bottom altitude in REBASED blocks (world Y minus the terrain rebase origin), w lightning flash.
+    public float4   skyLook4;
+    // xyz linear BT.709 vanilla sky colour (the attribute probe's per-dimension value), w the
+    // luminance anchor (cd/m²) that scales it to radiance for dimensions without an atmosphere.
+    public float4   skyLook5;
+    // xyz linear BT.709 vanilla fog colour, w fog start distance (blocks).
+    public float4   skyLook6;
+    // x fog end distance (blocks), y cloud frame delta (s), z cloud animation time (s),
+    // w weather sky-grey luminance (cd/m²).
+    public float4   skyLook7;
     public float4   sunUv;            // vanilla sun sprite atlas rect (u0,v0,u1,v1)
     public float4   moonUv;           // vanilla current-moon-phase sprite atlas rect
     public float4   waterParams;      // xyz linear ACEScg camera-biome water tint, w wave time (s)

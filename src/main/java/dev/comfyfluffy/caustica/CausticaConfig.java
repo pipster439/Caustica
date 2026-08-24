@@ -60,6 +60,8 @@ public final class CausticaConfig {
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Tonemap.GAMMA, Rt.FrameStats.ENABLED,
             Rt.Screenshots.EXR_ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Composite.WATER_WAVES, Rt.Composite.VOLUMETRIC_CLOUDS, Rt.Composite.WEATHER_EFFECTS,
+            Rt.Composite.VOLUMETRIC_FOG,
         };
     }
 
@@ -535,6 +537,12 @@ public final class CausticaConfig {
                     clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
+            public static final BooleanSetting VOLUMETRIC_CLOUDS =
+                    bool("caustica.rt.volumetricClouds", "composite.volumetric-clouds", true);
+            public static final BooleanSetting WEATHER_EFFECTS =
+                    bool("caustica.rt.weatherEffects", "composite.weather-effects", true);
+            public static final BooleanSetting VOLUMETRIC_FOG =
+                    bool("caustica.rt.volumetricFog", "composite.volumetric-fog", true);
             // Sun/moon angular radii and the noon south tilt moved into the versioned look package
             // (look.json "sky"): they shape the sky alongside the exposure curve, the LMT and the
             // photometric anchors that were already authored there, and splitting them across two
