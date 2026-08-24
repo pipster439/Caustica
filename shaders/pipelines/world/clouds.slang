@@ -48,35 +48,59 @@ public static const float2 CLOUD_WIND_DIR = float2(0.94386, 0.33035);
 // Maximum ray distance traversed inside the volumetric cloud layer.
 public static const float CLOUD_MAX_RAY_DIST = 4000.0;
 
-// Spherical atmospheric layer intersection accounting for Earth curvature and camera altitude
-public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, float topAlt, out float tEnter, out float tExit) {
+// Solve the intersection with a spherical altitude surface in the camera's local tangent frame.
+//
+// Do not form |ro|² - radius² or the small root as -b + sqrt(discriminant). At Earth scale both
+// operations subtract nearly equal ~4e13 / ~6e6 float values. The resulting direction-dependent
+// quantisation was the dark saddle/cone visible around the zenith when viewing a cloud base from below.
+// Factoring c preserves the altitude difference, and Vieta's product gives the small root without the
+// second cancellation.
+bool cloudAltitudeSphereRoots(float viewerAlt, float dirY, float layerAlt,
+                              out float tNear, out float tFar) {
     float planetRad = ATMOS_BOTTOM_KM * 1000.0;
-    float3 ro = float3(0.0, planetRad + origin.y, 0.0);
-    float radBot = planetRad + bottomAlt;
-    float radTop = planetRad + topAlt;
+    float b = (planetRad + viewerAlt) * dirY;
+    float c = (viewerAlt - layerAlt) * (2.0 * planetRad + viewerAlt + layerAlt);
+    float discriminant = b * b - c;
+    if (discriminant < 0.0) {
+        tNear = -1.0;
+        tFar = -1.0;
+        return false;
+    }
 
-    float bBot = dot(ro, dir);
-    float cBot = dot(ro, ro) - radBot * radBot;
-    float dBot = bBot * bBot - cBot;
+    float root = sqrt(discriminant);
+    float q = -b - (b >= 0.0 ? root : -root);
+    float r0;
+    float r1;
+    if (abs(q) > 1.0e-6) {
+        r0 = q;
+        r1 = c / q;
+    } else {
+        // The double root at a tangent is -b. Keeping this explicit also avoids 0 / 0.
+        r0 = -b;
+        r1 = -b;
+    }
+    tNear = min(r0, r1);
+    tFar = max(r0, r1);
+    return true;
+}
 
-    float bTop = dot(ro, dir);
-    float cTop = dot(ro, ro) - radTop * radTop;
-    float dTop = bTop * bTop - cTop;
-
-    if (dTop < 0.0) {
+// Spherical atmospheric layer intersection accounting for Earth curvature and camera altitude.
+public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, float topAlt, out float tEnter, out float tExit) {
+    float tTopNear;
+    float tTopFar;
+    if (!cloudAltitudeSphereRoots(origin.y, dir.y, topAlt, tTopNear, tTopFar)) {
         tEnter = 0.0;
         tExit = 0.0;
         return false;
     }
 
-    float tTopNear = -bTop - sqrt(dTop);
-    float tTopFar  = -bTop + sqrt(dTop);
-    float tBotNear = dBot >= 0.0 ? -bBot - sqrt(dBot) : -1.0;
-    float tBotFar  = dBot >= 0.0 ? -bBot + sqrt(dBot) : -1.0;
+    float tBotNear;
+    float tBotFar;
+    bool hitsBottom = cloudAltitudeSphereRoots(origin.y, dir.y, bottomAlt, tBotNear, tBotFar);
 
     if (origin.y < bottomAlt) {
-        // Viewer is strictly below the cloud layer
-        if (dBot >= 0.0 && tBotFar > 0.0) {
+        // Viewer is strictly below the cloud layer.
+        if (hitsBottom && tBotFar > 0.0) {
             tEnter = max(tBotFar, 0.0);
             tExit = min(tTopFar, tEnter + CLOUD_MAX_RAY_DIST);
         } else if (tTopFar > 0.0 && dir.y > 0.0) {
@@ -88,10 +112,10 @@ public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, floa
             return false;
         }
     } else if (origin.y > topAlt) {
-        // Viewer is strictly above the cloud layer
+        // Viewer is strictly above the cloud layer.
         if (tTopNear > 0.0) {
             tEnter = max(tTopNear, 0.0);
-            float naturalExit = (dBot >= 0.0 && tBotNear > 0.0) ? tBotNear : tTopFar;
+            float naturalExit = (hitsBottom && tBotNear > 0.0) ? tBotNear : tTopFar;
             tExit = min(naturalExit, tEnter + CLOUD_MAX_RAY_DIST);
         } else {
             tEnter = 0.0;
@@ -99,9 +123,9 @@ public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, floa
             return false;
         }
     } else {
-        // Viewer is INSIDE the cloud layer (bottomAlt <= origin.y <= topAlt)
+        // Viewer is INSIDE the cloud layer (bottomAlt <= origin.y <= topAlt).
         tEnter = 0.0;
-        float naturalExit = (dBot >= 0.0 && tBotNear > 0.0) ? tBotNear : tTopFar;
+        float naturalExit = (hitsBottom && tBotNear > 0.0) ? tBotNear : tTopFar;
         tExit = min(naturalExit, tEnter + CLOUD_MAX_RAY_DIST);
     }
 
