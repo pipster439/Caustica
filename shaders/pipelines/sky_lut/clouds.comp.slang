@@ -16,8 +16,11 @@ import bindings;
 [[vk::push_constant]] PushAddr pcAddr;
 
 // Mirrored in RtSkyLut.java; the two must agree exactly.
-public static const int CLOUD_DOME_W = 1280;
-public static const int CLOUD_DOME_H = 640;
+// Each orthographic hemisphere must have an odd square extent. With an even 640x640 extent the zenith
+// lies at the junction of four independently jittered texels; bilinear reconstruction turns their
+// differing cloud optical depths into a camera-centred four-way saddle on the cloud underside.
+public static const int CLOUD_DOME_W = 1282;
+public static const int CLOUD_DOME_H = 641;
 public static const int CLOUD_MARCH_STEPS = 48;
 
 float cloudLightOD(float3 pos, float3 lightDir, float2 anchor, float cloudAlt, float coverage, float time,
