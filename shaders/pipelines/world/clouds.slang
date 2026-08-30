@@ -2,13 +2,14 @@
 //
 //   * sky_lut/clouds.comp marches this field into a per-frame low-resolution dome (colour + transmittance)
 //     so no radiance ray ever marches clouds itself;
-//   * lighting.slang evaluates cloudTransmittanceToward() on celestial shadow rays that reached the sky,
-//     which is how cloud shadows land on terrain and how clouds dim the sun/moon NEE term;
+//   * sky_lut/cloud_shadow.comp evaluates this field once per world-XZ texel at the dominant light's
+//     layer-crossing midpoint and bakes a per-frame shadow map, so lighting.slang's celestial shadow
+//     rays read one bilinear fetch instead of re-evaluating the 3D field per ray;
 //   * sky.rmiss samples the baked dome at the sun/moon direction to occlude the drawn discs, and
 //     recontours the dome's blurred silhouette with this field; primary writes the cloud motion into the
 //     sky guide so DLSS-RR reprojects moving clouds.
 //
-// One density field, one set of layer constants: the bake and the shadow path can never disagree.
+// One density field, one set of layer constants: the bakes and the shadow path can never disagree.
 //
 // The density recipe follows the production volumetric-cloud model the sky_lut/noise3d.comp volumes were
 // baked for: 2D coverage noise shaped by a vertical fade/erosion profile, billow erosion against the
@@ -47,6 +48,13 @@ public static const float2 CLOUD_WIND_DIR = float2(0.94386, 0.33035);
 
 // Maximum ray distance traversed inside the volumetric cloud layer.
 public static const float CLOUD_MAX_RAY_DIST = 4000.0;
+
+// Celestial shadow LUT (sky_lut/cloud_shadow.comp): world-XZ span and texel resolution of the per-frame
+// bake that lighting.slang samples for celestial shadow rays. 4 blocks per texel sits far below the
+// density field's base-feature wavelength (CLOUD_SCALE), so a bilinear fetch reproduces the analytic
+// midpoint evaluation. Mirrored in RtSkyLut.java; the two must agree exactly.
+public static const int CLOUD_SHADOW_RES = 1024;
+public static const float CLOUD_SHADOW_EXTENT_BLOCKS = 4096.0;
 
 // Spherical atmospheric layer intersection accounting for Earth curvature and camera altitude
 public bool intersectCloudLayer(float3 origin, float3 dir, float bottomAlt, float topAlt, out float tEnter, out float tExit) {

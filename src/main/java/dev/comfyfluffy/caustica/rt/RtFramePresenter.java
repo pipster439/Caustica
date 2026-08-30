@@ -51,7 +51,15 @@ import java.nio.LongBuffer;
 public final class RtFramePresenter {
     public static final RtFramePresenter INSTANCE = new RtFramePresenter();
 
-    private static final long ACQUIRE_TIMEOUT_NS = 5_000_000_000L;
+    /**
+     * Acquire budget for FG extra images. FIFO present plus one or more extra images per frame can starve
+     * the swapchain when Minecraft's vanilla image count is tight; an acquire then blocks inside the
+     * driver on the render thread until an earlier present retires. A short budget turns that stall into
+     * a skipped FG frame (the acquire below returns without queueing this generated frame) instead of a
+     * multi-second hitch. Raising the swapchain's image count is the complementary fix and belongs to the
+     * swapchain-creation hook, not this path.
+     */
+    private static final long ACQUIRE_TIMEOUT_NS = 50_000_000L;
 
     private static final long LOG_INTERVAL_NS = 1_000_000_000L;
 

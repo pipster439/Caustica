@@ -796,6 +796,7 @@ public final class RtComposite {
                 worldPipeline.setSkyLuts(skyLut.skyViewView(), skyLut.transmittanceView(),
                         skyLut.sampler());
                 worldPipeline.setCloudDome(skyLut.cloudDomeView(), skyLut.cloudDomeSampler());
+                worldPipeline.setCloudShadow(skyLut.cloudShadowView(), skyLut.sampler());
                 worldPipeline.setCloudNoise(skyLut.cloudShapeNoiseView(), skyLut.cloudCurlNoiseView(),
                         skyLut.cloudNoiseSampler());
             }

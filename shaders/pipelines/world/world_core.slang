@@ -82,6 +82,44 @@ public static const float RAY_CONE_MIN_SPREAD = 1.0e-5;
 public static const float RAY_CONE_MIN_WIDTH = 1.0e-5;
 public static const float RAY_CONE_DIFFUSE_SPREAD = 0.25;
 public static const float RAY_CONE_GLOSSY_SPREAD_SCALE = 0.35;
+public static const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;
+public static const float RAY_CONE_MAX_LOD = 12.0;
+
+// Shared by closest-hit and any-hit. The payload's packed cone is the ray tracer's only LOD signal, so
+// hit and hit-test sampling must derive their mip the same way or the alpha test (any-hit) and the
+// albedo read (closest-hit) would disagree about which texels exist. Kept here rather than world_common
+// because RayTCurrent() is stage-illegal in the sky_lut compute passes that import that module.
+public float2 texSizePx(Sampler2D t) {
+    uint w, h;
+    t.GetDimensions(w, h);
+    return float2(w, h);
+}
+
+public float rayConeHitWidth(uint rayCone) {
+    float2 cone = unpackHalf2(rayCone);
+    return max(cone.x + cone.y * max(RayTCurrent(), 0.0), RAY_CONE_MIN_WIDTH);
+}
+
+public float edgeTexelsPerWorld(float3 p0, float3 p1, float2 uv0, float2 uv1, float2 textureSizePx) {
+    float worldLen = length(p1 - p0);
+    if (worldLen <= 1.0e-7) {
+        return 0.0;
+    }
+    return length((uv1 - uv0) * textureSizePx) / worldLen;
+}
+
+public float rayConeTextureLod(uint rayCone, float2 textureSizePx, float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, float2 uv2) {
+    float texelsPerWorld = max(edgeTexelsPerWorld(p0, p1, uv0, uv1, textureSizePx),
+            max(edgeTexelsPerWorld(p1, p2, uv1, uv2, textureSizePx),
+                edgeTexelsPerWorld(p2, p0, uv2, uv0, textureSizePx)));
+    float footprint = max(rayConeHitWidth(rayCone) * texelsPerWorld, RAY_CONE_MIN_TEXEL_FOOTPRINT);
+    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
+}
+
+public float rayConeUnitUvLod(uint rayCone, float2 textureSizePx) {
+    float footprint = max(rayConeHitWidth(rayCone) * max(textureSizePx.x, textureSizePx.y), RAY_CONE_MIN_TEXEL_FOOTPRINT);
+    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
+}
 
 // Stored roughness IS alpha (see payloadRoughness), so these compare against it directly.
 public static const float MIRROR_ALPHA_MAX = 4.0e-4; // LabPBR perceptual smoothness >= 0.98

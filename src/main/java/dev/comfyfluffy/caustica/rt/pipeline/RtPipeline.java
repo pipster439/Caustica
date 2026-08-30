@@ -182,6 +182,12 @@ public final class RtPipeline {
                         .descriptorCount(1)
                         .stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             }
+            // Celestial cloud shadow map: sampled only by lighting.slang's celestialCloudShadow, which
+            // runs in raygen.
+            binds.get(WORLD_CLOUD_SHADOW).binding(WORLD_CLOUD_SHADOW)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1)
+                    .stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
@@ -469,6 +475,11 @@ public final class RtPipeline {
     /** Bind the volumetric cloud dome (see {@link RtSkyLut}) with its own wrap-U sampler. */
     public void setCloudDome(long imageView, long sampler) {
         writeAtlasBinding(WORLD_CLOUDS, imageView, sampler);
+    }
+
+    /** Bind the celestial cloud shadow map (see {@link RtSkyLut}) with the sky LUT clamp sampler. */
+    public void setCloudShadow(long imageView, long sampler) {
+        writeAtlasBinding(WORLD_CLOUD_SHADOW, imageView, sampler);
     }
 
     /** Bind the static cloud noise volumes (see {@link RtSkyLut}); both share the repeat sampler. */

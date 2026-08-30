@@ -40,6 +40,12 @@ import static org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACI
  */
 public final class RtGpuExecutor {
     private static final int MAX_BUILD_BATCH = 32;
+    // Simultaneously executing batches before recording throttles to the GPU's pace. Each entry holds one
+    // in-execution command buffer plus its completion callbacks; 8 covers several frames of build backlog.
+    private static final int MAX_IN_FLIGHT = 8;
+    // Poll interval while builds are in flight and the job queue is empty: reaps completed batches
+    // promptly without spinning when the GPU is idle.
+    private static final long REAP_POLL_MS = 1;
     private static final Job STOP = new Job(null, null, null, null, null);
     private static final Job WAKE = new Job(null, null, null, null, null);
     private static final long TERRAIN_READ_STAGES =
@@ -56,6 +62,8 @@ public final class RtGpuExecutor {
     private final AtomicLong nextGraphicsValue = new AtomicLong();
     private final AtomicLong latestGraphicsUseValue = new AtomicLong();
     private final ArrayList<DestroyJob> destroyJobs = new ArrayList<>();
+    // Executor-thread-confined: batches submitted to the queue whose completion has not been reaped yet.
+    private final ArrayList<InFlightBatch> inFlight = new ArrayList<>();
     private final Object submissionLock = new Object();
     private long submittedBuildValue;
     private final Thread thread;
@@ -233,20 +241,34 @@ public final class RtGpuExecutor {
 
     private void run() {
         while (true) {
+            // Release completed batches before picking up new work so their callbacks and command
+            // buffers do not lag behind while new jobs keep arriving.
+            if (!reapInFlightSafely()) {
+                failQueuedJobs(executorFailure);
+                failInFlightJobs(executorFailure);
+                return;
+            }
             Job first;
             try {
-                first = jobs.take();
+                // With builds in flight, poll instead of blocking so completions are reaped promptly.
+                first = inFlight.isEmpty() ? jobs.take() : jobs.poll(REAP_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 failQueuedJobs(e);
+                failInFlightJobs(e);
                 return;
             }
+            if (first == null) {
+                continue; // poll timed out: loop back and reap completed in-flight batches
+            }
             if (first == STOP) {
+                drainInFlightSafely();
                 return;
             }
             if (first == WAKE) {
                 if (!processDestroyJobsSafely()) {
                     failQueuedJobs(executorFailure);
+                    failInFlightJobs(executorFailure);
                     return;
                 }
                 continue;
@@ -279,10 +301,13 @@ public final class RtGpuExecutor {
             }
             if (!executable.isEmpty()) {
                 try {
-                    execute(executable);
-                    for (Job job : executable) {
-                        finishJob(job, null);
+                    // Throttle recording to the GPU's pace once too many batches are executing; waiting
+                    // for the oldest one keeps record→execute overlapped without unbounded queue growth.
+                    if (inFlight.size() >= MAX_IN_FLIGHT) {
+                        waitTimeline(buildTimeline, inFlight.get(0).signalValue);
+                        reapInFlight();
                     }
+                    execute(executable);
                 } catch (Throwable t) {
                     for (Job job : executable) {
                         finishJob(job, t);
@@ -291,16 +316,83 @@ public final class RtGpuExecutor {
             }
             if (!processDestroyJobsSafely()) {
                 failQueuedJobs(executorFailure);
+                failInFlightJobs(executorFailure);
                 return;
             }
             if (executorFailure != null) {
                 failQueuedJobs(executorFailure);
+                failInFlightJobs(executorFailure);
                 return;
             }
             if (stopAfterBatch) {
+                drainInFlightSafely();
                 return;
             }
         }
+    }
+
+    /**
+     * Free the command buffer and run the completion callbacks of every batch the GPU finished. Batches
+     * are submitted in order to one queue, so the timeline releases them in signal order.
+     */
+    private void reapInFlight() {
+        if (inFlight.isEmpty()) {
+            return;
+        }
+        long completed = queryTimeline(buildTimeline);
+        while (!inFlight.isEmpty() && inFlight.get(0).signalValue <= completed) {
+            InFlightBatch batch = inFlight.remove(0);
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VK10.vkFreeCommandBuffers(ctx.vk(), commandPool, stack.pointers(batch.cmd));
+            }
+            if (inFlight.isEmpty()) {
+                VulkanDiagnostics.setInFlight("async-compute", null);
+            }
+            VulkanDiagnostics.breadcrumb("async-compute completed buildTimeline=" + batch.signalValue);
+            for (Job job : batch.jobs) {
+                finishJob(job, null);
+            }
+        }
+    }
+
+    private boolean reapInFlightSafely() {
+        try {
+            reapInFlight();
+            return true;
+        } catch (Throwable t) {
+            latchFailure(t);
+            failInFlightJobs(t);
+            return false;
+        }
+    }
+
+    /** Wait for every outstanding batch, then reap it. Used on exit paths that must not strand callbacks. */
+    private void drainInFlightSafely() {
+        try {
+            while (!inFlight.isEmpty()) {
+                waitTimeline(buildTimeline, inFlight.get(0).signalValue);
+                reapInFlight();
+            }
+        } catch (Throwable t) {
+            latchFailure(t);
+            failInFlightJobs(t);
+        }
+    }
+
+    /**
+     * Fail the jobs of every still-outstanding batch so task ownership unwinds. Their command buffers are
+     * left to the command pool: they may still be executing, and shutdown's device-idle wait plus pool
+     * destruction releases them.
+     */
+    private void failInFlightJobs(Throwable failure) {
+        Throwable terminal = failure != null ? failure : new IllegalStateException("RT GPU executor stopped");
+        while (!inFlight.isEmpty()) {
+            InFlightBatch batch = inFlight.remove(0);
+            for (Job job : batch.jobs) {
+                finishJob(job, terminal);
+            }
+        }
+        VulkanDiagnostics.setInFlight("async-compute", null);
     }
 
     private void finishJob(Job job, Throwable failure) {
@@ -382,10 +474,15 @@ public final class RtGpuExecutor {
         }
     }
 
+    /**
+     * Record and submit one batch, then return immediately: the batch joins {@link #inFlight} and is
+     * reaped (command buffer freed, callbacks run) once the build timeline passes its signal value.
+     * Waiting here instead would serialize recording against the GPU and stall {@code beginGraphicsUse}'s
+     * submission wait behind the previous batch's full execution.
+     */
     private void execute(List<Job> batch) {
         VkCommandBuffer cmd = null;
         boolean submitted = false;
-        boolean completed = false;
         long signalValue = batch.get(batch.size() - 1).build.value;
         long firstValue = batch.get(0).build.value;
         VulkanDiagnostics.setInFlight("async-compute",
@@ -426,19 +523,17 @@ public final class RtGpuExecutor {
             }
             VulkanDiagnostics.setInFlight("async-compute",
                     "submitted builds=" + firstValue + ".." + signalValue + " batch=" + batch.size());
-            waitTimeline(buildTimeline, signalValue);
-            completed = true;
-            VulkanDiagnostics.breadcrumb("async-compute completed buildTimeline=" + signalValue);
+            inFlight.add(new InFlightBatch(cmd, signalValue, batch));
         } finally {
-            // Never retry a failed host wait while unwinding: propagate its original error. A command
-            // buffer is safe to release here only if submission never happened or completion was observed.
-            // Otherwise the command pool owns it until shutdown waits the device idle and destroys the pool.
-            if (cmd != null && (!submitted || completed)) {
+            // A command buffer is safe to release only if submission never happened; otherwise the batch
+            // owns it until reapInFlight frees it after the timeline passes its signal value (and a
+            // failed executor exit leaves it to shutdown's device-idle wait plus pool destruction).
+            if (cmd != null && !submitted) {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
                     VK10.vkFreeCommandBuffers(ctx.vk(), commandPool, stack.pointers(cmd));
                 }
             }
-            if (!submitted || completed) {
+            if (!submitted) {
                 VulkanDiagnostics.setInFlight("async-compute", null);
             }
         }
@@ -559,6 +654,10 @@ public final class RtGpuExecutor {
 
     private record Job(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record, Runnable afterSuccess,
                        BiConsumer<Build, Throwable> finished, Build build) {
+    }
+
+    /** One submitted batch awaiting timeline completion: its command buffer plus completion callbacks. */
+    private record InFlightBatch(VkCommandBuffer cmd, long signalValue, List<Job> jobs) {
     }
 
     private record DestroyJob(long lastUseValue, Runnable destroy) {

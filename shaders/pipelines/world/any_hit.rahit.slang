@@ -12,6 +12,7 @@
 // a trace. Shadow traversal uses albedo.rgb as accumulated transmittance and hitT as the nearest-water
 // crossing; radiance cutout paths do not touch either field.
 import world_common;
+import world_core;
 import math;
 import bindings;
 
@@ -59,10 +60,23 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         uint i0 = indices[3u * pid + 0u];
         uint i1 = indices[3u * pid + 1u];
         uint i2 = indices[3u * pid + 2u];
-        float2 uv = bary.x * uvs[i0] + bary.y * uvs[i1] + bary.z * uvs[i2];
+        float2 uv0 = uvs[i0];
+        float2 uv1 = uvs[i1];
+        float2 uv2 = uvs[i2];
+        float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
         Prim epr = ConstPtr<Prim>(g.primAddr)[pid];
         int texSlot = int(epr.tint.w + 0.5);
-        float4 texel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(uv, 0.0);
+        // Alpha-test at the ray's texture mip, same ray-cone derivation as closest-hit's albedo read:
+        // distant leaves/fur then test a handful of filtered texels instead of mip-0 texels per any-hit.
+        // Rigid-reuse instances carry rotation, so object edges must be transformed to world lengths.
+        float3x3 entityO2w = (float3x3)ObjectToWorld3x4();
+        float entityLod = rayConeTextureLod(payload.rayCone,
+                texSizePx(entityAlbedoTex[NonUniformResourceIndex(texSlot)]),
+                mul(entityO2w, HitTriangleVertexPosition(0)),
+                mul(entityO2w, HitTriangleVertexPosition(1)),
+                mul(entityO2w, HitTriangleVertexPosition(2)),
+                uv0, uv1, uv2);
+        float4 texel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(uv, entityLod);
         bool stochasticAlpha = false;
         // Initialized so the guarded reads below are provably defined: they run exactly when this was
         // assigned, but the compiler cannot correlate the instance-kind test with the assignment.
@@ -147,8 +161,17 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // Cutout geometry: alpha from the atlas. PrimitiveIndex() restarts at 0 per geometry, so re-add this
     // bucket's triangle base to index the section's packed corner-UV array (3 UVs per triangle).
     ConstPtr<float2> uvs = ConstPtr<float2>(sec.uvAddr);
-    float2 uv = bary.x * uvs[3u * tri + 0u] + bary.y * uvs[3u * tri + 1u] + bary.z * uvs[3u * tri + 2u];
-    if (blockAlbedoAtlas.SampleLevel(uv, 0.0).a < ALPHA_CUTOFF) {
+    float2 uv0 = uvs[3u * tri + 0u];
+    float2 uv1 = uvs[3u * tri + 1u];
+    float2 uv2 = uvs[3u * tri + 2u];
+    float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+    // Alpha-test at the ray's mip, same derivation as closest-hit (world_common's rayConeTextureLod).
+    // Section instances are translation-only, so object-space edge lengths equal world lengths and the
+    // vertex positions need no transform here.
+    float cutoutLod = rayConeTextureLod(payload.rayCone, texSizePx(blockAlbedoAtlas),
+            HitTriangleVertexPosition(0), HitTriangleVertexPosition(1), HitTriangleVertexPosition(2),
+            uv0, uv1, uv2);
+    if (blockAlbedoAtlas.SampleLevel(uv, cutoutLod).a < ALPHA_CUTOFF) {
         IgnoreHit();
     }
 }

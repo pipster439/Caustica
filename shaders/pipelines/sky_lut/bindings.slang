@@ -11,3 +11,8 @@
 [[vk::binding(7, 0)]] [format("rgba8")] public RWTexture3D<float4> cloudCurlNoiseImage;
 [[vk::binding(8, 0)]] public Sampler3D cloudShapeNoise;
 [[vk::binding(9, 0)]] public Sampler3D cloudCurlNoise;
+// Per-frame celestial cloud shadow map (cloud_shadow.comp): R = the dominant light's Beer-Lambert
+// transmittance through the cumulus layer, indexed by the crossing midpoint's world XZ. The world
+// pipeline's lighting.slang samples the same image through the Sampler2D view below.
+[[vk::binding(10, 0)]] [format("r16f")] public RWTexture2D<float4> cloudShadowImage;
+[[vk::binding(11, 0)]] public Sampler2D cloudShadowLut;

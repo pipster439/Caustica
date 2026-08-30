@@ -307,6 +307,10 @@ public float2 unpackHalf2(uint p) {
     return float2(f16tof32(p & 0xFFFFu), f16tof32(p >> 16));
 }
 
+// Ray-cone texture LOD helpers (rayConeTextureLod etc.) live in world_core: they use the
+// RayTCurrent() ray-tracing builtin, which is stage-illegal in the sky_lut compute passes that import
+// this module.
+
 // ---- Payload.surface0..2 accessors. Two views of the same twelve bytes; see the struct for why.
 //
 // The hit view straddles surface1 (albedo.b in its low half, normal.x in its high half), so the two

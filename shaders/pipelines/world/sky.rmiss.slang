@@ -163,7 +163,18 @@ void main(inout Payload payload) {
 
         // 4K Native high-altitude cirrus evaluation (fine crystal fibers)
         float cirrusAlt = alt + CIRRUS_ALT_OFFSET + CIRRUS_THICKNESS * 0.5;
-        if (dir.y > 0.015 && worldPush.camOffset.y < cirrusAlt && baseT > 0.05) {
+        // Base atmosphere in-scatter feeds both the cirrus ambient term and the sky composition below;
+        // sun-direction extinction feeds both the cirrus tint and the drawn sun disc. Fetch each once —
+        // skyDome is 2 LUT taps + 2 skyViewLutUv (acos pair), sunExtinction another LUT tap — rather
+        // than recomputing them per consumer.
+        float3 dome = skyDome(dir, state);
+        bool cirrusRay = dir.y > 0.015 && worldPush.camOffset.y < cirrusAlt && baseT > 0.05;
+        float3 sunExtinction = float3(0.0);
+        if (cirrusRay || showCelestial) {
+            sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
+                    state.sunDir, state.sunAngularRadius);
+        }
+        if (cirrusRay) {
             float tCirrus = (cirrusAlt - worldPush.camOffset.y) / dir.y;
             if (tCirrus < 30000.0) {
                 float3 pCirrus = worldPush.camOffset.xyz + dir * tCirrus;
@@ -171,10 +182,8 @@ void main(inout Payload payload) {
                         state.cloudCoverage, state.cloudTime, cloudShapeNoise, cloudCurlNoise);
                 if (cirrusDensity > 0.0) {
                     float cirrusT = exp(-cirrusDensity * 0.30);
-                    float3 sunTint = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm, state.sunDir, state.sunAngularRadius);
-                    float3 lightColor = float3(state.sunIlluminance) * sunTint;
-                    float3 ambientSky = skyDome(dir, state);
-                    float3 cirrusLit = lightColor * (cloudPhase(dot(dir, state.sunDir)) * 0.85 + 0.15) + ambientSky * 0.65;
+                    float3 lightColor = float3(state.sunIlluminance) * sunExtinction;
+                    float3 cirrusLit = lightColor * (cloudPhase(dot(dir, state.sunDir)) * 0.85 + 0.15) + dome * 0.65;
                     float3 cirrusScatter = cirrusLit * (1.0 - cirrusT);
                     baseColor += baseT * cirrusScatter;
                     baseT *= cirrusT;
@@ -184,7 +193,7 @@ void main(inout Payload payload) {
 
         float3 cloudT = float3(baseT);
         float3 cloudColor = baseColor;
-        color = skyDome(dir, state) * cloudT + cloudColor;
+        color = dome * cloudT + cloudColor;
         // Airglow plus integrated unresolved starlight: the real floor of a moonless night sky (~1e-3
         // cd/m²), isotropic because it is emitted by the upper atmosphere itself rather than scattered
         // from a body. Multiple scattering is in the LUT, so this remains a flat, physically small
@@ -207,8 +216,6 @@ void main(inout Payload payload) {
 
         if (showCelestial) {
             float sunCos = dot(dir, state.sunDir);
-            float3 sunExtinction = transmittanceToSpace(transmittanceLut, state.viewerRadiusKm,
-                    state.sunDir, state.sunAngularRadius);
             float sunCloudT = celestialCloudTransmittance(state, state.sunDir, 0.015);
 
             // ---- Realistic Circular Sun Disc, Solar Limb Darkening, Corona & Lens Flare

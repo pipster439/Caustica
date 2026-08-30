@@ -3,8 +3,8 @@
 // light, A holds the Beer-Lambert transmittance from the viewer through the layer along that direction.
 //
 // world.rmiss then answers every sky pixel with one bilinear fetch of this dome instead of a march, and
-// lighting.slang uses the field's analytic transmittance for shadow rays — one field, evaluated once
-// per frame at dome resolution and once per shadow ray at a single midpoint.
+// sky_lut/cloud_shadow.comp bakes the same field once per world-XZ texel so celestial shadow rays read
+// the cloud term from a map instead of re-evaluating the 3D field per ray.
 //
 // Reads the same WorldPush BDA slot the trace and the sky LUTs do, so the clouds a ray sees and the
 // clouds the light samples can never disagree about coverage, altitude, wind time, or the sun.

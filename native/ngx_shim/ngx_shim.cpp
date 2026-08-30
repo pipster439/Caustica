@@ -23,6 +23,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <atomic>
 
 // Lightweight diagnostic logging. The shim is loaded into the JVM via FFM and a
 // crash here surfaces only as a bare SIGSEGV on the Java side, so we can trace every
@@ -44,7 +45,9 @@ static const char* kProjectId = "b6f1e9c2-7a44-4d1e-9b3a-1f2c3d4e5a6b";
 
 static NVSDK_NGX_Parameter* g_capabilityParams = nullptr;
 static VkDevice g_device = VK_NULL_HANDLE;
-static int g_lastResult = 0;
+// Written from whichever thread the JVM calls an entry point on; atomic so a concurrent
+// ngxshim_last_result() read never tears.
+static std::atomic<int> g_lastResult{0};
 
 // Logging sink wired into NVSDK_NGX_FeatureCommonInfo so the (closed) NGX core/SDK pipes its own
 // init diagnostics back to us. NGX init crashes deep inside the driver core on this setup; the core's
@@ -255,6 +258,13 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlss(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        // Wrap-up failed: release the NGX objects this path owns before returning null, or they leak.
+        NVSDK_NGX_VULKAN_ReleaseFeature(handle);
+        NVSDK_NGX_VULKAN_DestroyParameters(params);
+        g_lastResult = (int) NVSDK_NGX_Result_FAIL_PlatformError;
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = true; // allocated above; release destroys it
@@ -403,6 +413,11 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        NVSDK_NGX_VULKAN_ReleaseFeature(handle); // params is the shared capability block; do not destroy it
+        g_lastResult = (int) NVSDK_NGX_Result_FAIL_PlatformError;
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = false; // shared capability block, freed at shutdown
@@ -547,6 +562,11 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssg(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        NVSDK_NGX_VULKAN_ReleaseFeature(handle); // params is the shared capability block; do not destroy it
+        g_lastResult = (int) NVSDK_NGX_Result_FAIL_PlatformError;
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = false; // shared capability block, freed at shutdown

@@ -20,13 +20,18 @@ import world_common;
 [[vk::binding(10, 0)]] public Sampler2D skyViewLut;
 [[vk::binding(11, 0)]] public Sampler2D transmittanceLut;
 // Per-frame volumetric cloud dome (sky_lut/clouds.comp): RGB in-scatter, A transmittance. Sampled by
-// world.rmiss (dome + disc occlusion), primary.rgen (sky-guide cloud motion), and indirect.rgen stays on
-// the analytic field for shadow rays.
+// world.rmiss (dome + disc occlusion) and primary.rgen (sky-guide cloud motion); celestial shadow rays
+// read the cloudShadowLut bake below instead of the dome.
 [[vk::binding(12, 0)]] public Sampler2D cloudDomeLut;
 // Static tiling 3D cloud noise volumes (sky_lut/noise3d.comp), sampled by the density field in
 // clouds.slang from the miss shader (edge recontour) and raygen (shadow-path transmittance).
 [[vk::binding(13, 0)]] public Sampler3D cloudShapeNoise;
 [[vk::binding(14, 0)]] public Sampler3D cloudCurlNoise;
+// Per-frame celestial cloud shadow map (sky_lut/cloud_shadow.comp): R = the dominant light's
+// transmittance through the cumulus layer by crossing-midpoint world XZ. Sampled by lighting.slang's
+// celestialCloudShadow for every celestial shadow ray below the layer base; points inside or above the
+// layer fall back to the analytic field via the noise volumes above.
+[[vk::binding(15, 0)]] public Sampler2D cloudShadowLut;
 
 [[vk::binding(0, 1)]] public Sampler2D entityAlbedoTex[];
 [[vk::binding(1, 1)]] public Sampler2D materialSurface0Tex[];

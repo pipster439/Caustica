@@ -76,7 +76,7 @@ public void traceGuide(uint cullMask, float3 ro, float tmin, float3 rd, float tm
             MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
 }
 
-public Payload makeShadowPayload() {
+public Payload makeShadowPayload(uint rayCone) {
     Payload shadowPayload;
     shadowPayload.surface0 = 0u;
     shadowPayload.surface1 = 0u;
@@ -92,14 +92,17 @@ public Payload makeShadowPayload() {
     shadowPayload.roughMetal = 0u;
     shadowPayload.emissionSss = 0u;
     shadowPayload.iorTransmission = 0u;
-    shadowPayload.rayCone = 0u;
+    // The any-hit reads this for its alpha-test mip. 0 unpacks to width=spread=0, which
+    // rayConeTextureLod clamps to LOD 0 — the pre-cone behaviour for callers without cone context.
+    shadowPayload.rayCone = rayCone;
     return shadowPayload;
 }
 
-public VisibilityResult visibility(float3 origin, float3 dir, float tmax) {
+public VisibilityResult visibility(float3 origin, float3 dir, float tmax, uint rayCone = 0u) {
     // Vulkan requires an identical payload structure for every stage reachable by this trace. The shadow
-    // path uses only the albedo view as accumulated transmittance and hitT as the nearest-water crossing.
-    Payload shadowPayload = makeShadowPayload();
+    // path uses only the albedo view as accumulated transmittance and hitT as the nearest-water crossing;
+    // the packed cone rides along so any-hit can alpha-test at the ray's texture mip instead of mip 0.
+    Payload shadowPayload = makeShadowPayload(rayCone);
     // Shadow SBT records run any-hit only for cutout/translucent/water. Cutout alpha-tests; translucent
     // and water tint that transmittance and pass through. Solid blocks terminate traversal. There is no
     // closest shader worth executing. The lightweight guide miss clears the flags sentinel so this path

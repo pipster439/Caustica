@@ -249,9 +249,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             // camera side.
             float signedNdl = dot(n, lightDir);
             float ndl = abs(signedNdl);
+            // This vertex's surface footprint + current angular spread: the shadow ray's any-hit
+            // alpha-tests distant cutout at that ray-cone mip instead of mip 0.
+            uint shadowCone = packHalf2(float2(rayConeWidth, rayConeSpread));
             if (ndl > 0.0 && luminance(celestialLight.illuminance) > 0.0) {
                 float3 shadowOrigin = hitPos + (signedNdl >= 0.0 ? n : -n) * SURF_BIAS;
-                float3 vis = visibility(shadowOrigin, lightDir, 10000.0).transmittance;
+                float3 vis = visibility(shadowOrigin, lightDir, 10000.0, shadowCone).transmittance;
                 vis *= celestialCloudShadow(shadowOrigin, lightDir);
                 if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
                     L += throughput * albedo * INV_PI * celestialLight.illuminance * ndl * vis;
@@ -266,7 +269,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
                 Reservoir r = risInitial(hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0,
                                          true, 0.0, seed, proposalSeed);
                 L += throughput * shadeReservoir(r, hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0,
-                                                 true, 0.0);
+                                                 true, 0.0, shadowCone);
             }
 
             if (bounce >= maxBounces) {
@@ -326,8 +329,11 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
         }
         float ndl = max(0.0, dot(n, lightDir));
+        // This vertex's surface footprint + current angular spread: the shadow ray's any-hit
+        // alpha-tests distant cutout at that ray-cone mip instead of mip 0.
+        uint shadowCone = packHalf2(float2(rayConeWidth, rayConeSpread));
         if (ndl > 0.0 && luminance(celestialLight.illuminance) > 0.0) {
-            VisibilityResult shadow = visibility(p, lightDir, 10000.0);
+            VisibilityResult shadow = visibility(p, lightDir, 10000.0, shadowCone);
             float3 vis = shadow.transmittance;
             // A shadow ray that reached the sky crossed the cloud layer on the way: fold its
             // transmittance in so clouds shadow the sun/moon light and paint their moving shadows on
@@ -363,7 +369,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             Reservoir r = risInitial(hitPos, n, v, rd, diffAlb, F0, rough, false, activeSss,
                                      seed, proposalSeed);
             L += throughput * shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough, false,
-                                             activeSss);
+                                             activeSss, shadowCone);
         }
 
         // Thin-surface SSS transmission. Light entering from the back face scatters through toward the
@@ -375,7 +381,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
                 && luminance(celestialLight.illuminance) > 0.0) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
-                VisibilityResult shadowBack = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
+                VisibilityResult shadowBack = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0, shadowCone);
                 float3 visB = shadowBack.transmittance;
                 visB *= celestialCloudShadow(hitPos - n * SURF_BIAS, lightDir);
                 // Same caustic as the front-face NEE — underwater kelp/seagrass transmission should

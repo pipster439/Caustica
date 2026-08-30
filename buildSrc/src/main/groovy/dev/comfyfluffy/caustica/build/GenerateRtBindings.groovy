@@ -33,6 +33,7 @@ abstract class GenerateRtBindings extends DefaultTask {
                     G_SPEC_ALBEDO: "gSpecAlbedo", G_SPEC_MOTION: "gSpecMotion",
                     CELESTIALS: "celestialsAtlas", SKY_VIEW: "skyViewLut", TRANSMITTANCE: "transmittanceLut",
                     CLOUDS: "cloudDomeLut", CLOUD_SHAPE: "cloudShapeNoise", CLOUD_CURL: "cloudCurlNoise",
+                    CLOUD_SHADOW: "cloudShadowLut",
                     ENTITY_ALBEDO: "entityAlbedoTex", MATERIAL_SURFACE0: "materialSurface0Tex",
                     MATERIAL_NORMAL_AO: "materialNormalAoTex", MATERIAL_SURFACE1: "materialSurface1Tex"]],
             [prefix: "DISPLAY", source: "pipelines/display/main.comp.slang", resources: [
@@ -53,7 +54,8 @@ abstract class GenerateRtBindings extends DefaultTask {
                     SKY_VIEW_IMAGE: "skyViewImage", TRANSMITTANCE_SAMPLER: "transmittanceLut",
                     MULTISCATTER_SAMPLER: "multiScatterLut", CLOUD_DOME_IMAGE: "cloudDomeImage",
                     CLOUD_SHAPE_IMAGE: "cloudShapeNoiseImage", CLOUD_CURL_IMAGE: "cloudCurlNoiseImage",
-                    CLOUD_SHAPE_SAMPLER: "cloudShapeNoise", CLOUD_CURL_SAMPLER: "cloudCurlNoise"]],
+                    CLOUD_SHAPE_SAMPLER: "cloudShapeNoise", CLOUD_CURL_SAMPLER: "cloudCurlNoise",
+                    CLOUD_SHADOW_IMAGE: "cloudShadowImage", CLOUD_SHADOW_SAMPLER: "cloudShadowLut"]],
             [prefix: "PRESENT", source: "pipelines/hdr_composite/main.comp.slang", resources: [
                     OUTPUT: "outputImage", SOURCE: "sourceImage"]],
             [prefix: "OVERLAY_IMAGE", source: "pipelines/overlay_composite/glow.frag.slang", resources: [VALUE: "sourceImage"]],

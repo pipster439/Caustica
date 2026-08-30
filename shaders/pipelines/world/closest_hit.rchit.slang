@@ -7,6 +7,7 @@
 // through worldPushAddr first would cost an extra global-memory load just to find the address of the
 // load we actually want. The cold WorldPush struct is dereferenced only for the breaking overlay.
 import world_common;
+import world_core;
 import math;
 import bindings;
 
@@ -36,41 +37,8 @@ uint materialEmissionSource(MaterialHeader header, float emission) {
 // tracer already computes its own AO from sky-visibility rays (avoid double-darkening).
 static const float NORMAL_AO_STRENGTH = 0.5;
 
-static const float RAY_CONE_MIN_WIDTH = 1.0e-5;
-static const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;
-static const float RAY_CONE_MAX_LOD = 12.0;
-
-float2 texSizePx(Sampler2D t) {
-    uint w, h;
-    t.GetDimensions(w, h);
-    return float2(w, h);
-}
-
-float rayConeHitWidth(uint rayCone) {
-    float2 cone = unpackHalf2(rayCone);
-    return max(cone.x + cone.y * max(RayTCurrent(), 0.0), RAY_CONE_MIN_WIDTH);
-}
-
-float edgeTexelsPerWorld(float3 p0, float3 p1, float2 uv0, float2 uv1, float2 textureSizePx) {
-    float worldLen = length(p1 - p0);
-    if (worldLen <= 1.0e-7) {
-        return 0.0;
-    }
-    return length((uv1 - uv0) * textureSizePx) / worldLen;
-}
-
-float rayConeTextureLod(uint rayCone, float2 textureSizePx, float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, float2 uv2) {
-    float texelsPerWorld = max(edgeTexelsPerWorld(p0, p1, uv0, uv1, textureSizePx),
-            max(edgeTexelsPerWorld(p1, p2, uv1, uv2, textureSizePx),
-                edgeTexelsPerWorld(p2, p0, uv2, uv0, textureSizePx)));
-    float footprint = max(rayConeHitWidth(rayCone) * texelsPerWorld, RAY_CONE_MIN_TEXEL_FOOTPRINT);
-    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
-}
-
-float rayConeUnitUvLod(uint rayCone, float2 textureSizePx) {
-    float footprint = max(rayConeHitWidth(rayCone) * max(textureSizePx.x, textureSizePx.y), RAY_CONE_MIN_TEXEL_FOOTPRINT);
-    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
-}
+// Ray-cone LOD helpers (texSizePx / rayConeHitWidth / edgeTexelsPerWorld / rayConeTextureLod /
+// rayConeUnitUvLod) live in world_common so any-hit derives its alpha-test mip the same way.
 
 // LabPBR _n decode (shared): rotate the tangent-space normal into world space via a TBN built from the
 // hit triangle's vertex positions (VK_KHR_ray_tracing_position_fetch) + UVs. `n` must already be

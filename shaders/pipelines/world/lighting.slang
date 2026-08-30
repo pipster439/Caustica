@@ -296,9 +296,10 @@ public Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3
 // Shade a finalized reservoir: recompute the survivor's contribution at (hitPos,n,v), cast ONE shadow
 // ray, and return throughput-free radiance contrib*vis*W. The one ray serves whichever term fired for
 // the survivor (front BRDF, twoSided billboard, or SSS backscatter) — the origin is biased toward the
-// sample's side of the surface.
+// sample's side of the surface. `rayCone` is the shading vertex's packed cone, forwarded so the shadow
+// ray's any-hit alpha-tests at the vertex's texture mip (0 keeps the unconed mip-0 behaviour).
 public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb,
-                      float3 F0, float rough, bool twoSided, float sss) {
+                      float3 F0, float rough, bool twoSided, float sss, uint rayCone = 0u) {
     if (s.W <= 0.0 || s.phat <= 0.0) {
         return float3(0.0, 0.0, 0.0);
     }
@@ -317,7 +318,7 @@ public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, flo
     float3 toL = s.pos - origin;
     float dist = length(toL);
     // Stop just short of the sample point so the ray doesn't self-occlude on the emitter's own face.
-    VisibilityResult shadow = visibility(origin, toL / dist, dist * 0.999);
+    VisibilityResult shadow = visibility(origin, toL / dist, dist * 0.999, rayCone);
     float3 vis = shadow.transmittance;
     return contrib * vis * s.W;
 }
@@ -328,15 +329,31 @@ public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, flo
 // Terrain / entities / block entities keep 0xFF (both bits). Particles use 0x02: primary-visible
 
 // Cloud shadowing for the celestial NEE light. A shadow ray that reached the sky crossed the cloud
-// layer on the way, so it folds the layer's Beer-Lambert transmittance (evaluated at the crossing's
-// midpoint — see clouds.slang) into the light. This is what dims sun/moonlight under clouds and paints
-// the moving soft shadows on terrain; it shares the dome bake's density field, so the visible clouds
-// and the light they block can never disagree. No-op outside the overworld or with clouds off.
+// layer on the way, so it folds the layer's Beer-Lambert transmittance into the light. For any shading
+// point below the layer base — virtually every receiver — the crossing's midpoint altitude and clamped
+// in-layer span are constants of the light direction (flat-slab twin of intersectCloudLayer; planetary
+// curvature moves the midpoint by ~1e-2 blocks at this layer thickness), so the transmittance folds to
+// one bilinear fetch of the per-frame world-XZ bake (sky_lut/cloud_shadow.comp). Points inside or above
+// the layer keep the analytic midpoint evaluation on the same density field. This is what dims
+// sun/moonlight under clouds and paints the moving soft shadows on terrain; sharing the dome bake's
+// field keeps the visible clouds and the light they block in agreement. No-op outside the overworld
+// or with clouds off.
 public float celestialCloudShadow(float3 origin, float3 lightDir) {
     if (worldPush.skyLook4.x != float(DIMENSION_OVERWORLD) || worldPush.skyLook4.y <= 0.0) {
         return 1.0;
     }
+    float cloudAlt = worldPush.skyLook4.z;
+    if (origin.y < cloudAlt && lightDir.y > 0.002) {
+        float span = min(CLOUD_THICKNESS_BLOCKS, CLOUD_MAX_RAY_DIST * lightDir.y);
+        float tMid = (cloudAlt + span * 0.5 - origin.y) / lightDir.y;
+        float2 midXz = origin.xz + lightDir.xz * tMid;
+        float2 uv = (midXz - worldPush.camOffset.xz) / CLOUD_SHADOW_EXTENT_BLOCKS + 0.5;
+        return cloudShadowLut.SampleLevel(uv, 0.0).r;
+    }
+    // Inside or above the layer the crossing midpoint shifts with the origin's altitude: the world-XZ
+    // map cannot cover it, so keep the analytic midpoint evaluation (rare — only builds reaching into
+    // the clouds).
     return cloudTransmittanceToward(origin, lightDir, worldPush.waterAnchor.xy,
-            worldPush.skyLook4.z, worldPush.skyLook4.y, worldPush.skyLook7.z,
+            cloudAlt, worldPush.skyLook4.y, worldPush.skyLook7.z,
             cloudShapeNoise, cloudCurlNoise);
 }

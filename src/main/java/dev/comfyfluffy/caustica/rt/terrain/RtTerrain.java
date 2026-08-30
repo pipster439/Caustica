@@ -1043,10 +1043,21 @@ public final class RtTerrain {
             long key = heapKey[i];
             SectionGeom g = resident.get(key);
             queuedReextract.remove(key);
-            removeUnsorted(reextract, reextract.indexOf(key));
             dispatchSectionBuild(dispatch, key, g.sx >> 4, g.sy >> 4, g.sz >> 4);
             remaining--;
             dispatched++;
+        }
+        if (dispatched > 0) {
+            // Every key still in reextract but no longer in queuedReextract was dispatched above (the
+            // main loop's other removals already took those entries out of both). One pass removes them
+            // all instead of an O(n) indexOf scan per dispatched key.
+            for (int i = 0; i < reextract.size(); ) {
+                if (!queuedReextract.contains(reextract.getLong(i))) {
+                    removeUnsorted(reextract, i);
+                } else {
+                    i++;
+                }
+            }
         }
         return dispatched;
     }
